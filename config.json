@@ -45,6 +45,7 @@
     "5m"
   ],
   "use_candlestick_conditions": true,
-  "log_level": "debug",
+  "log_level": "info",
   "initial_total_capital": 6599.049210928
+
 }
