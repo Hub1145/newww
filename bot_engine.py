@@ -1174,6 +1174,8 @@ class TradingBotEngine:
             entry_confirmed = False
             actual_entry_price = 0.0
             actual_qty = 0.0
+            actual_side = None
+            found_pos_side = None
 
             if response and response.get('code') == '0':
                 positions = response.get('data', [])
@@ -1182,12 +1184,19 @@ class TradingBotEngine:
                     if pos.get('instId') == self.config['symbol']:
                         pos_qty_str = pos.get('pos', '0')
                         size_val = safe_float(pos_qty_str)
-                        if size_val > 0:
+                        if abs(size_val) > 0:
                             avg_entry_price_rv = safe_float(pos.get('avgPx', 0))
                             actual_entry_price = avg_entry_price_rv
                             actual_qty = size_val
                             entry_confirmed = True
-                            self.log(f"DEBUG: Confirmed active position - Entry Price: {actual_entry_price}, Quantity: {actual_qty}", level="debug")
+                            # Determine actual side if 'net'
+                            found_pos_side = pos.get('posSide')
+                            if found_pos_side == 'net' or not found_pos_side:
+                                actual_side = 'short' if size_val < 0 else 'long'
+                            else:
+                                actual_side = found_pos_side
+                            
+                            self.log(f"DEBUG: Confirmed active {actual_side} position - Entry Price: {actual_entry_price}, Quantity: {actual_qty}", level="debug")
                             break
 
             if not entry_confirmed or actual_entry_price <= 0:
@@ -1200,15 +1209,17 @@ class TradingBotEngine:
             tp_price_offset = self.config.get('tp_price_offset', 0.6)
             sl_price_offset = self.config.get('sl_price_offset', 30)
 
-            # Assuming long position for now based on strategy
-            signal_direction = self.pending_entry_order_details.get('signal')
+            # Use confirmed actual_side instead of signal_direction to be more robust
+            self.log(f"DEBUG: confirm_and_set_active_position: actual_side={actual_side}, qty={actual_qty}", level="debug")
 
-            if signal_direction == 1: # Long position
+            if actual_side == 'long':
                 tp_price = actual_entry_price + tp_price_offset
                 sl_price = actual_entry_price - sl_price_offset
-            else: # Short position (signal_direction == -1)
+                exit_order_side = "sell"
+            else: # short
                 tp_price = actual_entry_price - tp_price_offset
                 sl_price = actual_entry_price + sl_price_offset
+                exit_order_side = "buy"
             
             with self.position_lock:
                 self.in_position = True
@@ -1222,12 +1233,12 @@ class TradingBotEngine:
                 # Update internal state for open trades to include this new position
                 self.open_trades = [{
                     'id': filled_order_id,
-                    'type': 'long' if self.pending_entry_order_details.get('signal') == 1 else 'short',
+                    'type': actual_side,
                     'entry_spot_price': self.position_entry_price,
-                    'stake': self.position_qty * self.position_entry_price,
+                    'stake': abs(self.position_qty) * self.position_entry_price,
                     'tp_price': self.current_take_profit,
                     'sl_price': self.current_stop_loss,
-                    'quantity': self.position_qty
+                    'quantity': abs(self.position_qty)
                 }]
 
                 self.emit('trades_update', {'trades': self.open_trades})
@@ -1241,7 +1252,7 @@ class TradingBotEngine:
             self.log(f"DEBUG: self.in_position set to {self.in_position}", level="debug")
 
             self.log("=" * 80, level="info")
-            self.log("OKX POSITION OPENED", level="info")
+            self.log(f"OKX {actual_side.upper()} POSITION OPENED", level="info")
             self.log(f"Entry: ${actual_entry_price:.2f} | Qty: {actual_qty}", level="info")
             self.log(f"TP: ${tp_price:.2f} | SL: ${sl_price:.2f} (separate algo order)", level="info")
             self.log("=" * 80, level="info")
@@ -1253,54 +1264,52 @@ class TradingBotEngine:
             tp_body = {
                 "instId": self.config['symbol'],
                 "tdMode": self.config.get('mode', 'cross'),
-                "side": "sell",
-                "posSide": "long",
+                "side": exit_order_side,
+                "posSide": found_pos_side if found_pos_side else "net",
                 "ordType": "conditional",
-                "sz": f"{(actual_qty * (self.config.get('tp_amount', 100) / 100)):.{qty_precision}f}",
+                "sz": f"{(abs(actual_qty) * (self.config.get('tp_amount', 100) / 100)):.{qty_precision}f}",
                 "tpTriggerPx": f"{tp_price:.{price_precision}f}",
-                "tpOrdPx": "market" if self.config.get('tp_mode', 'market') == 'market' else f"{tp_price:.{price_precision}f}",
+                "tpOrdPx": "-1" if self.config.get('tp_mode', 'market') == 'market' else f"{tp_price:.{price_precision}f}",
                 "reduceOnly": "true"
             }
 
             tp_order = self._okx_place_algo_order(tp_body)
             if tp_order and (tp_order.get('algoId') or tp_order.get('ordId')):
+                algo_id = tp_order.get('algoId') or tp_order.get('ordId')
                 with self.position_lock:
-                    self.position_exit_orders['tp'] = tp_order.get('algoId') or tp_order.get('ordId')
-                self.log(f"✓ TP algo order placed", level="info")
+                    self.position_exit_orders['tp'] = algo_id
+                self.log(f"✓ TP algo order placed: {algo_id}", level="info")
             else:
-                self.log(f"CRITICAL: TP algo order failed! Closing position", level="error")
+                self.log(f"❌ Failed to place TP algo order: {tp_order}", level="error")
                 self._execute_trade_exit("Failed to place TP")
                 return
 
             sl_body = {
                 "instId": self.config['symbol'],
                 "tdMode": self.config.get('mode', 'cross'),
-                "side": "sell",
-                "posSide": "long",
+                "side": exit_order_side,
+                "posSide": found_pos_side if found_pos_side else "net",
                 "ordType": "conditional",
-                "sz": f"{(actual_qty * (self.config.get('sl_amount', 100) / 100)):.{qty_precision}f}",
+                "sz": f"{(abs(actual_qty) * (self.config.get('sl_amount', 100) / 100)):.{qty_precision}f}",
                 "slTriggerPx": f"{sl_price:.{price_precision}f}",
-                "slOrdPx": "market" if self.config.get('tp_mode', 'market') == 'market' else f"{sl_price:.{price_precision}f}",
+                "slOrdPx": "-1", # market
                 "reduceOnly": "true"
             }
 
             sl_order = self._okx_place_algo_order(sl_body)
             if sl_order and (sl_order.get('algoId') or sl_order.get('ordId')):
+                algo_id = sl_order.get('algoId') or sl_order.get('ordId')
                 with self.position_lock:
-                    self.position_exit_orders['sl'] = sl_order.get('algoId') or sl_order.get('ordId')
-                self.log(f"✓ SL algo order placed", level="info")
+                    self.position_exit_orders['sl'] = algo_id
+                self.log(f"✓ SL algo order placed: {algo_id}", level="info")
             else:
-                self.log(f"CRITICAL: SL algo order failed! Closing position", level="error")
+                self.log(f"❌ Failed to place SL algo order: {sl_order}", level="error")
                 self._execute_trade_exit("Failed to place SL")
                 return
 
-            self.log("=" * 80, level="info")
-            self.log("✓ OKX POSITION CONFIGURED (SL and TP active)", level="info")
-            self.log("=" * 80, level="info")
-
-            # Account information is no longer updated in real-time via private WebSocket.
         except Exception as e:
             self.log(f"Exception in _confirm_and_set_active_position (OKX): {e}", level="error")
+
 
     def _execute_trade_exit(self, reason):
         try:
@@ -1339,31 +1348,37 @@ class TradingBotEngine:
 
     def _check_and_close_any_open_position(self):
         try:
-            self.log("Checking for any open OKX positions...", level="info")
+            self.log("Checking for any open OKX positions to close...", level="info")
             path = "/api/v5/account/positions"
             params = {"instType": "SWAP", "instId": self.config['symbol']}
             response = self._okx_request("GET", path, params=params)
 
-            if not response or response.get('code') == '0':
+            any_closed = False
+            if response and response.get('code') == '0':
                 positions = response.get('data', [])
                 for pos in positions:
                     if pos.get('instId') == self.config['symbol']:
                         size_rv = safe_float(pos.get('pos', 0))
-                        pos_side = pos.get('posSide', 'unknown') or pos.get('side', 'unknown')
-                        if size_rv > 0:
+                        if abs(size_rv) > 0:
+                            # Detect side from pos negative/positive or posSide
+                            pos_side = pos.get('posSide')
+                            if pos_side == 'net' or not pos_side:
+                                pos_side = 'short' if size_rv < 0 else 'long'
+                            
                             self.log(f"⚠️ Found open {pos_side} OKX position: {size_rv} {self.config['symbol']}", level="warning")
-                            close_side = "Sell" if size_rv > 0 else "Buy"
-                            self.log(f"Closing {size_rv} {self.config['symbol']} with market {close_side} order", level="info")
-                            close_order = self._okx_place_order(self.config['symbol'], close_side, size_rv, order_type="Market", reduce_only=True)
+                            # If size_rv is negative (short), we must BUY to close
+                            close_side = "Buy" if size_rv < 0 else "Sell"
+                            self.log(f"Closing {abs(size_rv)} {self.config['symbol']} with market {close_side} order", level="info")
+                            close_order = self._okx_place_order(self.config['symbol'], close_side, abs(size_rv), order_type="Market", reduce_only=True)
                             if close_order and close_order.get('ordId'):
-                                self.log(f"✓ Position close order placed", level="info")
-                                return True
+                                self.log(f"✓ Position close order placed: {close_order.get('ordId')}", level="info")
+                                any_closed = True
                             else:
-                                self.log(f"❌ Failed to place close order", level="error")
-                                return False
+                                self.log(f"❌ Failed to place close order for {pos_side} position", level="error")
 
-            self.log("No open OKX positions found", level="info")
-            return False
+            if not any_closed:
+                self.log("No open OKX positions found to close.", level="info")
+            return any_closed
         except Exception as e:
             self.log(f"Exception in _check_and_close_any_open_position (OKX): {e}", level="error")
             return False
@@ -2003,91 +2018,91 @@ class TradingBotEngine:
                     pos_side = pos.get('posSide')
                     avg_px = safe_float(pos.get('avgPx', '0'))
 
-                    if pos_qty > 0 and avg_px > 0:
-                        # Recalculate TP/SL based on current market price (or avg_px if preferred)
-                        # Here we use avg_px as the base for recalculation, similar to initial placement
-                        if pos_side == 'long':
+                    if abs(pos_qty) > 0 and avg_px > 0:
+                        # Determine actual side if 'net'
+                        if pos_side == 'net' or not pos_side:
+                            actual_side = 'short' if pos_qty < 0 else 'long'
+                        else:
+                            actual_side = pos_side
+
+                        # Recalculate TP/SL based on avg_px
+                        if actual_side == 'long':
                             new_tp = avg_px + tp_price_offset
                             new_sl = avg_px - sl_price_offset
+                            order_side = "sell"
                         else: # short
                             new_tp = avg_px - tp_price_offset
                             new_sl = avg_px + sl_price_offset
+                            order_side = "buy"
                         
-                        # Cancel existing algo orders for this position
-                        # This part assumes we track algoIds for each position or can retrieve them
-                        # For simplicity, we'll try to cancel any existing TP/SL for this instId and then place new ones
-                        # A more robust solution would track algoIds per position
                         self.log(f"Cancelling existing TP/SL for {self.config['symbol']} before placing new ones...", level="info")
-                        # OKX API does not have a direct way to cancel all algo orders for a position easily without their algoId
-                        # A more complex implementation would would involve listing algo orders and filtering by instId and type.
-                        # For now, we assume we want to update the *current* position's TP/SL if it exists.
-                        # The _confirm_and_set_active_position already places TP/SL.
-                        # To modify, we need to cancel existing algo orders and place new ones.
-                        # This implies we need to store algoIds in self.position_exit_orders more persistently.
 
                         with self.position_lock:
-                            if self.in_position and self.position_exit_orders:
+                            # We try to cancel even if internal state is missing, but we need algoIds.
+                            # If internal state is missing, we might need to fetch pending algo orders first.
+                            # For now, we fix the logic for when state IS present.
+                            if self.position_exit_orders:
                                 if 'tp' in self.position_exit_orders and self.position_exit_orders['tp']:
                                     self._okx_cancel_algo_order(self.config['symbol'], self.position_exit_orders['tp'])
                                 if 'sl' in self.position_exit_orders and self.position_exit_orders['sl']:
                                     self._okx_cancel_algo_order(self.config['symbol'], self.position_exit_orders['sl'])
-                                time.sleep(0.5) # Give some time for cancellation
+                                time.sleep(0.5) 
 
-                                # Place new TP and SL algo orders
-                                tp_body = {
-                                    "instId": self.config['symbol'],
-                                    "tdMode": "cross",
-                                    "side": "sell" if pos_side == 'long' else "buy",
-                                    "posSide": pos_side,
-                                    "ordType": "conditional",
-                                    "sz": f"{pos_qty:.{qty_precision}f}",
-                                    "tpTriggerPx": f"{new_tp:.{price_precision}f}",
-                                    "tpOrdPx": "market",
-                                    "reduceOnly": "true"
-                                }
+                            # Place new TP and SL algo orders
+                            tp_body = {
+                                "instId": self.config['symbol'],
+                                "tdMode": self.config.get('mode', 'cross'),
+                                "side": order_side,
+                                "posSide": pos_side,
+                                "ordType": "conditional",
+                                "sz": f"{abs(pos_qty):.{qty_precision}f}",
+                                "tpTriggerPx": f"{new_tp:.{price_precision}f}",
+                                "tpOrdPx": "-1", # market
+                                "reduceOnly": "true"
+                            }
 
-                                tp_order = self._okx_place_algo_order(tp_body)
-                                if tp_order and (tp_order.get('algoId') or tp_order.get('ordId')):
-                                    self.position_exit_orders['tp'] = tp_order.get('algoId') or tp_order.get('ordId')
-                                    self.log(f"✓ New TP algo order placed for position", level="info")
-                                else:
-                                    self.log(f"CRITICAL: New TP algo order failed for position!", level="error")
+                            tp_order = self._okx_place_algo_order(tp_body)
+                            if tp_order and (tp_order.get('algoId') or tp_order.get('ordId')):
+                                self.position_exit_orders['tp'] = tp_order.get('algoId') or tp_order.get('ordId')
+                                self.log(f"✓ New TP algo order placed for {actual_side} position", level="info")
+                            else:
+                                self.log(f"CRITICAL: New TP algo order failed for {actual_side} position!", level="error")
 
-                                sl_body = {
-                                    "instId": self.config['symbol'],
-                                    "tdMode": "cross",
-                                    "side": "sell" if pos_side == 'long' else "buy",
-                                    "posSide": pos_side,
-                                    "ordType": "conditional",
-                                    "sz": f"{pos_qty:.{qty_precision}f}",
-                                    "slTriggerPx": f"{new_sl:.{price_precision}f}",
-                                    "slOrdPx": "market",
-                                    "reduceOnly": "true"
-                                }
+                            sl_body = {
+                                "instId": self.config['symbol'],
+                                "tdMode": self.config.get('mode', 'cross'),
+                                "side": order_side,
+                                "posSide": pos_side,
+                                "ordType": "conditional",
+                                "sz": f"{abs(pos_qty):.{qty_precision}f}",
+                                "slTriggerPx": f"{new_sl:.{price_precision}f}",
+                                "slOrdPx": "-1", # market
+                                "reduceOnly": "true"
+                            }
 
-                                sl_order = self._okx_place_algo_order(sl_body)
-                                if sl_order and (sl_order.get('algoId') or sl_order.get('ordId')):
-                                    self.position_exit_orders['sl'] = sl_order.get('algoId') or sl_order.get('ordId')
-                                    self.log(f"✓ New SL algo order placed for position", level="info")
-                                else:
-                                    self.log(f"CRITICAL: New SL algo order failed for position!", level="error")
-                                
-                                self.current_take_profit = new_tp
-                                self.current_stop_loss = new_sl
-                                modified_count += 1
-                                self.emit('position_update', {
-                                    'in_position': self.in_position,
-                                    'position_entry_price': self.position_entry_price,
-                                    'position_qty': self.position_qty,
-                                    'current_take_profit': self.current_take_profit,
-                                    'current_stop_loss': self.current_stop_loss
-                                })
+                            sl_order = self._okx_place_algo_order(sl_body)
+                            if sl_order and (sl_order.get('algoId') or sl_order.get('ordId')):
+                                self.position_exit_orders['sl'] = sl_order.get('algoId') or sl_order.get('ordId')
+                                self.log(f"✓ New SL algo order placed for {actual_side} position", level="info")
+                            else:
+                                self.log(f"CRITICAL: New SL algo order failed for {actual_side} position!", level="error")
+                            
+                            self.current_take_profit = new_tp
+                            self.current_stop_loss = new_sl
+                            modified_count += 1
+                            self.emit('position_update', {
+                                'in_position': self.in_position,
+                                'position_entry_price': self.position_entry_price,
+                                'position_qty': self.position_qty,
+                                'current_take_profit': self.current_take_profit,
+                                'current_stop_loss': self.current_stop_loss
+                            })
 
             if modified_count > 0:
                 self.log(f"Successfully modified TP/SL for {modified_count} positions.", level="info")
                 self.emit('success', {'message': f'Successfully modified TP/SL for {modified_count} positions.'})
             else:
-                self.log("No active positions found to modify TP/SL.", level="warning")
+                self.log("No active positions found (or matched criteria) to modify TP/SL.", level="warning")
                 self.emit('warning', {'message': 'No active positions found to modify TP/SL.'})
 
         except Exception as e:
@@ -2100,34 +2115,38 @@ class TradingBotEngine:
     def batch_cancel_orders(self):
         self.log("Initiating batch order cancellation...", level="info")
         try:
+            cancelled_count = 0
+            
+            # 1. Cancel Limit Orders
             path = "/api/v5/trade/orders-pending"
             params = {"instType": "SWAP", "instId": self.config['symbol']}
             response = self._okx_request("GET", path, params=params)
 
-            if not response or response.get('code') != '0':
-                self.log(f"Failed to fetch pending orders for batch cancellation: {response}", level="error")
-                self.emit('error', {'message': f'Failed to batch cancel orders: Could not fetch pending orders.'})
-                return
-
-            orders = response.get('data', [])
-            cancelled_count = 0
-
-            for order in orders:
-                order_id = order.get('ordId')
-                algo_id = order.get('algoId') 
-
-                if order_id:
-                    if algo_id: 
-                        if self._okx_cancel_algo_order(self.config['symbol'], algo_id):
-                            cancelled_count += 1
-                            time.sleep(0.1)
-                    else: 
+            if response and response.get('code') == '0':
+                orders = response.get('data', [])
+                for order in orders:
+                    order_id = order.get('ordId')
+                    if order_id:
                         if self._okx_cancel_order(self.config['symbol'], order_id):
                             cancelled_count += 1
                             time.sleep(0.1)
 
+            # 2. Cancel Algo Orders (TP/SL/Conditional)
+            path_algo = "/api/v5/trade/orders-algo-pending"
+            params_algo = {"instType": "SWAP", "instId": self.config['symbol']}
+            response_algo = self._okx_request("GET", path_algo, params=params_algo)
+
+            if response_algo and response_algo.get('code') == '0':
+                algo_orders = response_algo.get('data', [])
+                for algo_order in algo_orders:
+                    algo_id = algo_order.get('algoId')
+                    if algo_id:
+                        if self._okx_cancel_algo_order(self.config['symbol'], algo_id):
+                            cancelled_count += 1
+                            time.sleep(0.1)
+
             if cancelled_count > 0:
-                self.log(f"Successfully cancelled {cancelled_count} pending orders.", level="info")
+                self.log(f"Successfully cancelled {cancelled_count} pending orders (Limit & Algo).", level="info")
                 self.emit('success', {'message': f'Successfully cancelled {cancelled_count} pending orders.'})
             else:
                 self.log("No pending orders found to cancel.", level="warning")
