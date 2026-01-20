@@ -46,6 +46,5 @@
   ],
   "use_candlestick_conditions": true,
   "log_level": "info",
-  "initial_total_capital": 6599.049210928
-
+  "initial_total_capital": 0
 }

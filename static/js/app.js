@@ -113,7 +113,7 @@ function toggleCandlestickInputs() {
         }
     });
 }
- 
+
 async function testApiKey() {
     const testBtn = document.getElementById('testApiKeyBtn');
     const originalBtnHtml = testBtn.innerHTML; // Store original button content
@@ -234,7 +234,7 @@ function updateBotStatus(running) {
     }
     startStopBtn.disabled = false; // Re-enable the button
 }
- 
+
 function updateAccountMetrics(data) {
     document.getElementById('totalCapital').textContent = `$${data.total_capital !== undefined ? data.total_capital.toFixed(2) : '0.00'}`;
     document.getElementById('maxAllowedUsedDisplay').textContent = `$${data.max_allowed_used_display !== undefined ? data.max_allowed_used_display.toFixed(2) : '0.00'}`;
@@ -245,10 +245,10 @@ function updateAccountMetrics(data) {
     document.getElementById('netProfit').textContent = `$${data.net_profit !== undefined ? data.net_profit.toFixed(2) : '0.00'}`;
     document.getElementById('totalTrades').textContent = data.total_trades !== undefined ? data.total_trades : '0';
 }
- 
+
 function updatePositionDisplay(positionData) {
     const mlResultsContainer = document.getElementById('mlStrategyResults'); // This is for Current Position card
- 
+
     if (!positionData || !positionData.in_position) {
         mlResultsContainer.innerHTML = '<p class="text-muted">No active position.</p>';
         return;
@@ -281,8 +281,8 @@ function updatePositionDisplay(positionData) {
 
 function updateParametersDisplay() {
     const paramsContainer = document.getElementById('currentParams');
-     if (currentConfig) {
-       let configHtml = `
+    if (currentConfig) {
+        let configHtml = `
            <div class="param-item">
                <span class="param-label">Symbol:</span>
                <span class="param-value">${currentConfig.symbol}</span>
@@ -424,7 +424,7 @@ function updateParametersDisplay() {
                <span class="param-value">${currentConfig.max_chg_high_close}</span>
            </div>
        `;
-       paramsContainer.innerHTML = configHtml;
+        paramsContainer.innerHTML = configHtml;
     } else {
         paramsContainer.innerHTML = '<p class="text-muted">No parameters loaded yet.</p>';
     }
@@ -432,7 +432,7 @@ function updateParametersDisplay() {
 
 function updateOpenTrades(trades) {
     const tradesContainer = document.getElementById('openTrades');
-    
+
     if (!trades || trades.length === 0) {
         tradesContainer.innerHTML = '<p class="text-muted">No open positions</p>';
         return;
@@ -468,7 +468,7 @@ function updateOpenTrades(trades) {
 
 function addConsoleLog(log) {
     const consoleOutput = document.getElementById('consoleOutput');
-    
+
     if (consoleOutput.querySelector('.text-muted')) {
         consoleOutput.innerHTML = '';
     }
@@ -480,8 +480,14 @@ function addConsoleLog(log) {
         <span class="console-message">${escapeHtml(log.message)}</span>
     `;
 
+    // Check if user is near the bottom
+    const isAtBottom = consoleOutput.scrollHeight - consoleOutput.clientHeight <= consoleOutput.scrollTop + 50;
+
     consoleOutput.appendChild(logLine);
-    consoleOutput.scrollTop = consoleOutput.scrollHeight;
+
+    if (isAtBottom) {
+        consoleOutput.scrollTop = consoleOutput.scrollHeight;
+    }
 
     if (consoleOutput.children.length > 500) {
         consoleOutput.removeChild(consoleOutput.firstChild);
@@ -508,7 +514,7 @@ async function loadStatus() {
     try {
         const response = await fetch('/api/status');
         const status = await response.json();
-        
+
         updateBotStatus(status.running);
         updateAccountMetrics(status);
         updateOpenTrades(status.open_trades);
@@ -556,8 +562,8 @@ function loadConfigToModal() {
     document.getElementById('tpMode').value = currentConfig.tp_mode;
     document.getElementById('tpType').value = currentConfig.tp_type;
     document.getElementById('useCandlestickConditions').checked = currentConfig.use_candlestick_conditions;
- 
-     // Candlestick conditions
+
+    // Candlestick conditions
     document.getElementById('useChgOpenClose').checked = currentConfig.use_chg_open_close;
     document.getElementById('minChgOpenClose').value = currentConfig.min_chg_open_close;
     document.getElementById('maxChgOpenClose').value = currentConfig.max_chg_open_close;
@@ -606,7 +612,7 @@ async function saveConfig() {
         tp_mode: document.getElementById('tpMode').value,
         tp_type: document.getElementById('tpType').value,
         use_candlestick_conditions: document.getElementById('useCandlestickConditions').checked,
- 
+
         // Candlestick conditions
         use_chg_open_close: document.getElementById('useChgOpenClose').checked,
         min_chg_open_close: parseFloat(document.getElementById('minChgOpenClose').value),
