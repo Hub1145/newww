@@ -23,7 +23,7 @@
   "cancel_unfilled_seconds": 90,
   "cancel_on_tp_price_below_market": true,
   "cancel_on_entry_price_below_market": true,
-  "direction": "short",
+  "direction": "long",
   "mode": "isolated",
   "tp_amount": 100,
   "sl_amount": 100,
@@ -46,5 +46,5 @@
   ],
   "use_candlestick_conditions": true,
   "log_level": "info",
-  "initial_total_capital": 0
+  "initial_total_capital": 7233.211253709815
 }

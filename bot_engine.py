@@ -138,11 +138,12 @@ class TradingBotEngine:
         self.latest_trade_timestamp = None
         self.account_balance = 0.0
         self.available_balance = 0.0
-        self.initial_total_capital = 0.0 # New attribute for persisting initial total capital
+        self.initial_total_capital = self.config.get('initial_total_capital', 0.0) # Correctly load from config
         self.account_info_lock = threading.Lock()
         self.in_position = False
         self.position_entry_price = 0.0
         self.position_qty = 0.0
+        self.batch_counter = 0 # Track batches for logging
         self.current_stop_loss = 0.0
         self.current_take_profit = 0.0
         self.used_amount_notional = 0.0
@@ -309,6 +310,14 @@ class TradingBotEngine:
     # ================================================================================
     # OKX API Helper Functions (Adapted as methods)
     # ================================================================================
+
+    def _save_config(self):
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config, f, indent=2)
+            self.log(f"Config saved to {self.config_path}", level="debug")
+        except Exception as e:
+            self.log(f"Error saving config: {e}", level="error")
 
     def _okx_request(self, method, path, params=None, body_dict=None, max_retries=3):
         local_dt = datetime.now(timezone.utc)
@@ -604,9 +613,9 @@ class TradingBotEngine:
             "op": "subscribe",
             "args": channels
         }
-        self.log(f"WS Sending public subscription request: {json.dumps(subscription_payload)}", level="info")
+        self.log(f"WS Sending public subscription request: {json.dumps(subscription_payload)}", level="debug")
         self.ws.send(json.dumps(subscription_payload))
-        self.log(f"WS Sent public subscription request for {len(channels)} channels.", level="info")
+        self.log(f"WS Sent public subscription request for {len(channels)} channels.", level="debug")
         # Populate pending_subscriptions with the channels we just sent
         self.pending_subscriptions = {f"{arg['channel']}:{arg['instId']}" for arg in channels}
 
@@ -614,14 +623,14 @@ class TradingBotEngine:
         self.log(f"OKX WebSocket error: {error}", level="error")
 
     def _on_websocket_close(self, ws_app, close_status_code, close_msg):
-        self.log("OKX WebSocket closed.", level="warning")
+        self.log("OKX WebSocket closed.", level="debug")
         if self.is_running and not self.stop_event.is_set():
-            self.log('Attempting to reconnect WebSocket...', level="info")
+            self.log('Attempting to reconnect WebSocket...', level="debug")
             time.sleep(5)
             self.ws_thread = threading.Thread(target=self._initialize_websocket_and_start_main_loop, daemon=True)
             self.ws_thread.start()
         else:
-            self.log('WebSocket will not reconnect as bot is stopped.', level="info")
+            self.log('WebSocket will not reconnect as bot is stopped.', level="debug")
 
     def connect(self): # This method will be called from start()
         ws_url = self._get_ws_url()
@@ -735,7 +744,7 @@ class TradingBotEngine:
 
                     self.historical_data_store[timeframe] = df
 
-                    self.log(f"Loaded {len(df)} candles for {timeframe}", level="info")
+                    self.log(f"Loaded {len(df)} candles for {timeframe}", level="debug")
                     return True
                 else:
                     self.log(f"Failed to fetch data for {timeframe}", level="error")
@@ -800,12 +809,12 @@ class TradingBotEngine:
     def _okx_place_algo_order(self, body):
         try:
             path = "/api/v5/trade/order-algo"
-            self.log(f"Placing algo order: {body}", level="info")
+            self.log(f"Placing algo order", level="info")
             response = self._okx_request("POST", path, body_dict=body)
             if response and response.get('code') == '0':
                 data = response.get('data', [])
                 if data and (data[0].get('algoId') or data[0].get('ordId')):
-                    self.log(f"✓ Algo order placed: {data[0]}", level="info")
+                    self.log(f"✓ Algo order placed", level="info")
                     return data[0]
                 else:
                     self.log(f"✗ Algo order placed but no algoId/ordId returned: {response}", level="error")
@@ -1498,7 +1507,7 @@ class TradingBotEngine:
             min_chg = self.config.get('min_chg_high_low', 0)
             max_chg = self.config.get('max_chg_high_low', 0)
             if not (min_chg <= chg_high_low <= max_chg):
-                self.log(f"Candlestick Fail: High-Low change ({chg_high_low:.2f}) out of range ({min_chg}-{max_chg}).", "info")
+                self.log(f"⚠️ Candlestick High-Low ({chg_high_low:.2f}) not in range.", "debug")
                 return False
 
         # Check High-Close Change
@@ -1507,35 +1516,36 @@ class TradingBotEngine:
             min_chg = self.config.get('min_chg_high_close', 0)
             max_chg = self.config.get('max_chg_high_close', 0)
             if not (min_chg <= chg_high_close <= max_chg):
-                self.log(f"Candlestick Fail: High-Close change ({chg_high_close:.2f}) out of range ({min_chg}-{max_chg}).", "info")
+                self.log(f"⚠️ Candlestick High-Close ({chg_high_close:.2f}) not in range.", "debug")
                 return False
 
-        self.log("Candlestick conditions PASSED.", "info")
+        self.log("✅ Candlestick criteria met.", "debug")
         return True
 
     def _check_entry_conditions(self, market_data):
-        # We now allow multiple entries (averaging down/up) based on used amount
+        # CLIENT REQ: Max Allowed Used is BEFORE Leverage (Margin); Target/Min are AFTER (Notional)
         leverage = float(self.config.get('leverage', 1))
-        max_allowed_margin = self.config.get('max_allowed_used', 1000)
-        max_notional = max_allowed_margin * leverage
+        max_notional = self.config.get('max_allowed_used', 1000) * leverage
         
-        # Check if we have room for at least one more batch
-        min_order_margin = self.config.get('min_order_amount', 100)
-        batch_size = self.config.get('batch_size_per_loop', 1)
-        next_batch_notional = min_order_margin * leverage * batch_size
-
+        min_notional_per_order = self.config.get('min_order_amount', 100)
+        
         with self.position_lock:
-            if self.used_amount_notional + next_batch_notional > max_notional:
-                self.log(f"Entry check: Not enough room for new batch. Used: ${self.used_amount_notional:.2f}, Limit: ${max_notional:.2f}", level="info")
-                self.log("Max allowed amount reached. Not enough room for new trades.", level="info")
+            remaining_notional = max_notional - self.used_amount_notional
+            
+            if remaining_notional < min_notional_per_order:
+                self.log(f"Entry check: Not enough room. Used: ${self.used_amount_notional:.2f}, Limit: ${max_notional:.2f}", level="debug")
+                self.log("⚠️ Limit reached: Not enough room for new trades.", level="info")
                 return False, 0.0, None
 
         current_price = market_data['current_price']
         
         # Determine entry side based on safety lines and direction config
         direction = self.config.get('direction', 'long')
-        long_condition = current_price < self.config['long_safety_line_price'] and direction == 'long'
-        short_condition = current_price > self.config['short_safety_line_price'] and direction == 'short'
+        # Safety Line Logic: 
+        # LONG only if price is ABOVE the safety floor.
+        # SHORT only if price is BELOW the safety ceiling.
+        long_condition = current_price > self.config.get('long_safety_line_price', 0) and direction == 'long'
+        short_condition = current_price < self.config.get('short_safety_line_price', float('inf')) and direction == 'short'
 
         signal = 0
         if long_condition:
@@ -1554,26 +1564,25 @@ class TradingBotEngine:
 
         entry_price_offset = self.config['entry_price_offset']
         if signal == 1: # Long
-            limit_price = current_price - entry_price_offset # Buy at a slightly lower price
+            limit_price = current_price - entry_price_offset
         else: # Short
-            limit_price = current_price + entry_price_offset # Sell at a slightly higher price
+            limit_price = current_price + entry_price_offset
 
-        self.log(f"Entry check for {('LONG' if signal == 1 else 'SHORT')} PASSED at limit price {limit_price:.2f}", level="debug")
+        self.log(f"Entry Details | Market: {current_price:.2f} | Offset: {entry_price_offset:.2f} | Final Limit: {limit_price:.2f}", level="info")
         return True, limit_price, signal
 
     def _initiate_entry_sequence(self, initial_limit_price, signal, batch_size):
-        # We now allow multiple entries based on max_allowed_used check in _check_entry_conditions
-        pass 
-
         with self.account_info_lock:
             current_available_balance = self.available_balance
 
-        if current_available_balance < self.config['min_order_amount']:
-            self.log(f"Entry aborted: Available balance ({current_available_balance:.2f}) is less than min_order_amount ({self.config['min_order_amount']:.2f}).", level="warning")
-            self.log("Balance is not enough to open new trades", level="info")
+        min_notional = self.config.get('min_order_amount', 100)
+        if current_available_balance * float(self.config.get('leverage', 1)) < min_notional:
+            self.log(f"Entry aborted: Available notional ({current_available_balance * float(self.config.get('leverage', 1)):.2f}) < Min ({min_notional:.2f}).", level="debug")
+            self.log("⚠️ Insufficient balance to open new trades.", level="info")
             return
 
         batch_offset = self.config['batch_offset']
+        self.batch_counter += 1
         
         for i in range(batch_size):
             current_limit_price = initial_limit_price
@@ -1584,51 +1593,67 @@ class TradingBotEngine:
                     current_limit_price += (batch_offset * i)
 
             if current_limit_price <= 0:
-                self.log(f"Entry aborted for batch order {i+1}: Invalid limit entry price {current_limit_price}", level="error")
+                self.log(f"Entry aborted for Batch {self.batch_counter}-{i+1}: Invalid price {current_limit_price}", level="error")
                 continue
 
-            # --- START CALCULATING ORDER SIZE (Margin-Based) ---
+            # Recalculate room for EVERY order in the batch to be precise
             leverage = float(self.config.get('leverage', 1))
-            margin_amount_usdt = self.config['min_order_amount']
-            trade_amount_usdt = margin_amount_usdt * leverage
+            max_notional = self.config.get('max_allowed_used', 1000) * leverage
             
-            self.log(f"DEBUG: Calculation Mode: Margin-Based. Margin: {margin_amount_usdt} USDT | Leverage: {leverage}x", level="debug")
-            self.log(f"DEBUG: Target Position Value (Notional): {trade_amount_usdt} USDT", level="debug")
-
-            # 2. Calculate Base Asset Quantity (e.g. ETH)
-            # Use 99% of target to ensure we stay under the limit (user preferred 99 over 101)
-            target_notional = trade_amount_usdt * 0.99 
-            qty_base_asset_unrounded = target_notional / current_limit_price
+            with self.position_lock:
+                remaining_notional = max_notional - self.used_amount_notional
             
-            # 3. Convert to Contracts
+            target_notional = self.config.get('target_order_amount', 100)
+            
+            if remaining_notional < min_notional:
+                self.log(f"Batch placement stopped: Remaining notional room (${remaining_notional:.2f}) below Min (${min_notional:.2f})", level="info")
+                break
+                
+            # Use all remaining room if it's between Min and Target
+            trade_amount_usdt = min(target_notional, remaining_notional)
+            
+            # Use 99.5% safety buffer for contracts to ensure we NEVER exceed limits
+            safe_trade_notional = trade_amount_usdt * 0.995 
+            
+            qty_base_asset = safe_trade_notional / current_limit_price
             contract_size = safe_float(PRODUCT_INFO.get('contractSize', 1.0))
             if contract_size <= 0: contract_size = 1.0
 
-            qty_contracts_unrounded = qty_base_asset_unrounded / contract_size
-            
-            # 4. Round down to 'minOrderQty' precision
             min_order_qty = safe_float(PRODUCT_INFO.get('minOrderQty', 1.0))
-            if min_order_qty <= 0: min_order_qty = 1.0
-
-            # math.floor ensures we don't exceed the target amount
-            qty_contracts = math.floor(qty_contracts_unrounded / min_order_qty) * min_order_qty
+            qty_contracts = math.floor((qty_base_asset / contract_size) / min_order_qty) * min_order_qty
             
-            # If floor results in 0, we can only trade if min_order_qty is within budget
             if qty_contracts < min_order_qty:
-                potential_margin = (min_order_qty * contract_size * current_limit_price) / leverage
-                if potential_margin <= margin_amount_usdt:
+                # One last attempt to see if 1 contract fits
+                if (min_order_qty * contract_size * current_limit_price) <= remaining_notional:
                     qty_contracts = min_order_qty
                 else:
-                    self.log(f"Skipping trade batch: Minimum contract size margin (${potential_margin:.2f}) exceeds requested limit (${margin_amount_usdt:.2f})", level="warning")
+                    self.log(f"Batch {self.batch_counter}-{i+1} skipped: Min size margin too expensive for remaining room.", level="warning")
                     continue
-            
+
             qty_precision = PRODUCT_INFO.get('qtyPrecision', 0)
             qty_contracts = round(qty_contracts, qty_precision)
-            
-            actual_usdt_value = qty_contracts * contract_size * current_limit_price
-            actual_margin = actual_usdt_value / leverage
+            actual_notional = qty_contracts * contract_size * current_limit_price
 
-            self.log(f"🚀 Placing {('Long' if signal == 1 else 'Short')} entry: {qty_contracts} contracts at ${current_limit_price:.2f} (Est. Margin: ${actual_margin:.2f})", level="info")
+            # Calculate Target TP/SL for logging clarity as requested
+            tp_px = 0.0
+            sl_px = 0.0
+            tp_offset = self.config.get('tp_price_offset', 0)
+            sl_offset = self.config.get('sl_price_offset', 0)
+            if signal == 1: # LONG
+                tp_px = current_limit_price + tp_offset
+                sl_px = current_limit_price - sl_offset
+            else: # SHORT
+                tp_px = current_limit_price - tp_offset
+                sl_px = current_limit_price + sl_offset
+
+            log_header = f"BATCH {self.batch_counter}-{i+1}"
+            self.log("-" * 40, level="info")
+            self.log(f"🚀 {log_header} PLACED", level="info")
+            self.log(f"   • Side   : {('LONG' if signal == 1 else 'SHORT')} | Mode: {self.config.get('mode', 'cross').upper()}", level="info")
+            self.log(f"   • Entry  : {current_limit_price:.2f} (Limit)", level="info")
+            self.log(f"   • Targets: TP {tp_px:.2f} | SL {sl_px:.2f}", level="info")
+            self.log(f"   • Amount : ${actual_notional:.2f} (Notional)", level="info")
+            self.log("-" * 40, level="info")
             
             entry_order_response = self._okx_place_order(self.config['symbol'], "Buy" if signal == 1 else "Sell", qty_contracts, price=current_limit_price, order_type="Limit", time_in_force="GoodTillCancel")
 
@@ -1658,6 +1683,9 @@ class TradingBotEngine:
                     )
                     self.position_manager_thread.start()
                     self.log("Position manager active.", level="debug")
+
+                # Trigger an immediate account info update to refresh values and trigger TP/SL faster
+                threading.Thread(target=self._fetch_and_emit_account_info, daemon=True).start()
             else:
                 self.log(f"Batch entry order {i+1} placement failed", level="error")
                 # If one order fails, should we stop the sequence or continue? For now, continue.
@@ -1725,18 +1753,17 @@ class TradingBotEngine:
                                 continue
 
                 if not is_in_pos and not active_pending_ids:
-                    self.log("Position manager exiting (no active position/order)", level="info")
                     break
 
-            self.log("Position manager thread finished", level="info")
+            self.log("Position manager finished.", level="debug")
         except Exception as e:
             self.log(f"Exception in _manage_position_lifecycle: {e}", level="error")
 
     def _process_new_cycle_and_check_entry(self):
         try:
-            self.log("=" * 80, level="info")
-            self.log(f"[TIMER] NEW TRADING CYCLE - Entry Check @ {datetime.now(timezone.utc).strftime('%H:%M:%S')}", level="info")
-            self.log("=" * 80, level="info")
+            self.log("-" * 90, level="info")
+            self.log(f"🔄 CYCLE CHECK @ {datetime.now(timezone.utc).strftime('%H:%M:%S')}", level="info")
+            self.log("-" * 90, level="info")
 
             market_data = self._get_latest_data_and_indicators()
 
@@ -1751,10 +1778,10 @@ class TradingBotEngine:
             entry_signal, limit_price, signal_direction = self._check_entry_conditions(market_data)
 
             if entry_signal:
-                self.log(f">>> ENTRY SIGNAL <<< Limit order at {limit_price:.2f} for {('LONG' if signal_direction == 1 else 'SHORT')}", level="info")
+                self.log(f"🔔 SIGNAL: {('LONG' if signal_direction == 1 else 'SHORT')} at {limit_price:.2f}", level="info")
                 self._initiate_entry_sequence(limit_price, signal_direction, self.config['batch_size_per_loop'])
             else:
-                self.log(f"Price: ${market_data['current_price']:.2f} | Looking for {self.config.get('direction', 'long')} entry...", level="debug")
+                self.log(f"Price: ${market_data['current_price']:.2f} | Waiting for {self.config.get('direction', 'long')} signal...", level="debug")
         except Exception as e:
             self.log(f"Exception in _process_new_cycle_and_check_entry: {e}", level="error")
 
@@ -2012,21 +2039,29 @@ class TradingBotEngine:
             # REMOVED: self.initial_total_capital = total_balance reset. 
             # We want to keep the original capital to track net profit correctly.
         else:
-            self.initial_total_capital = self.config.get('initial_total_capital', 0.0)
+            # If initial_total_capital is 0 (first run or reset), set it to current total balance
+            if self.initial_total_capital <= 0 and total_balance > 0:
+                 self.initial_total_capital = total_balance
+                 self.config['initial_total_capital'] = total_balance
+                 self._save_config()
+                 self.log(f"Initialized Total Capital to ${total_balance:.2f} and saved to config", level="info")
+            else:
+                 # Otherwise respect what's in config (or memory)
+                 pass
 
         total_active_trades_count = self.total_trades_count + len(formatted_open_trades)
 
         # Emit data to frontend
         self.emit('account_update', {
             'total_trades': total_active_trades_count,
-            'total_capital': self.initial_total_capital if self.initial_total_capital > 0 else self.account_balance,
+            'total_capital': self.initial_total_capital,
             'max_allowed_used_display': max_allowed_display, 
             'max_amount_display': max_amount_display,
             'used_amount': used_amount_notional, 
             'remaining_amount': remaining_amount_notional, 
             'total_balance': total_balance,
             'available_balance': available_balance,
-            'net_profit': total_balance - self.initial_total_capital if self.initial_total_capital > 0 else 0.0
+            'net_profit': total_balance - self.initial_total_capital 
         })
         
         self.log(f"Account Update | Balance: ${total_balance:.2f} | Active Positions: {active_positions_count} | Pending: {len(formatted_open_trades)}", level="debug")
@@ -2110,16 +2145,31 @@ class TradingBotEngine:
                             actual_side = pos_side
 
                         # Recalculate TP/SL based on avg_px
-                        if actual_side == 'long':
-                            new_tp = avg_px + tp_price_offset
-                            new_sl = avg_px - sl_price_offset
-                            order_side = "sell"
-                        else: # short
-                            new_tp = avg_px - tp_price_offset
-                            new_sl = avg_px + sl_price_offset
-                            order_side = "buy"
-                        
-                        self.log(f"Syncing TP/SL for {actual_side} position...", level="info")
+                    # Audit: Using tp_price_offset/sl_price_offset as primary offsets.
+                    # Future: Could integrate tp_amount/sl_amount if configured for fixed $ value.
+                    if actual_side == 'long':
+                        new_tp = avg_px + tp_price_offset
+                        new_sl = avg_px - sl_price_offset
+                        order_side = "sell"
+                    else: # short
+                        new_tp = avg_px - tp_price_offset
+                        new_sl = avg_px + sl_price_offset
+                        order_side = "buy"
+                    
+                    # LOGGING AUDIT: Clear avg_px tracking to debug user discrepancy
+                    self.log(f"Syncing TP/SL for {actual_side} position. Avg Price: {avg_px:.{price_precision}f}", level="info")
+
+                    # SAFE TP LOGIC: Prevent OKX error 51277 (trigger price invalid)
+                    # If market has already MOVE PAST our target, adjust trigger to ensure it flips.
+                    price_tick = 1.0 / (10**price_precision)
+                    if actual_side == 'long':
+                        if current_market_price >= new_tp:
+                            self.log(f"⚠️ Market ({current_market_price}) above TP ({new_tp}). Adjusting to trigger immediately.", level="warning")
+                            new_tp = current_market_price + price_tick
+                    else: # short
+                        if current_market_price <= new_tp:
+                            self.log(f"⚠️ Market ({current_market_price}) below TP ({new_tp}). Adjusting to trigger immediately.", level="warning")
+                            new_tp = current_market_price - price_tick
 
                         with self.position_lock:
                             # 1. Fetch ALL active algo orders for this symbol from OKX to be safe
@@ -2142,6 +2192,9 @@ class TradingBotEngine:
                             time.sleep(0.5) 
 
                             # Place new TP and SL algo orders
+                            # CONFIG AUDIT: Use 'tp_mode' and 'trigger_price' from config
+                            trig_px_type = self.config.get('trigger_price', 'last')
+                            
                             tp_body = {
                                 "instId": self.config['symbol'],
                                 "tdMode": self.config.get('mode', 'cross'),
@@ -2150,16 +2203,17 @@ class TradingBotEngine:
                                 "ordType": "conditional",
                                 "sz": f"{abs(pos_qty):.{qty_precision}f}",
                                 "tpTriggerPx": f"{new_tp:.{price_precision}f}",
-                                "tpOrdPx": "-1", # market
+                                "tpTriggerPxType": trig_px_type,
+                                "tpOrdPx": "-1", # market order for TP realization
                                 "reduceOnly": "true"
                             }
 
                             tp_order = self._okx_place_algo_order(tp_body)
                             if tp_order and (tp_order.get('algoId') or tp_order.get('ordId')):
                                 self.position_exit_orders['tp'] = tp_order.get('algoId') or tp_order.get('ordId')
-                                self.log(f"✓ New TP algo order placed for {actual_side} position", level="info")
+                                self.log(f"🎯 TP Order Set: {new_tp:.{price_precision}f} ({trig_px_type} price)", level="info")
                             else:
-                                self.log(f"CRITICAL: New TP algo order failed for {actual_side} position!", level="error")
+                                self.log(f"❌ TP Placement Failed!", level="error")
 
                             sl_body = {
                                 "instId": self.config['symbol'],
@@ -2169,16 +2223,17 @@ class TradingBotEngine:
                                 "ordType": "conditional",
                                 "sz": f"{abs(pos_qty):.{qty_precision}f}",
                                 "slTriggerPx": f"{new_sl:.{price_precision}f}",
-                                "slOrdPx": "-1", # market
+                                "slTriggerPxType": trig_px_type,
+                                "slOrdPx": "-1", # market order for SL realization
                                 "reduceOnly": "true"
                             }
 
                             sl_order = self._okx_place_algo_order(sl_body)
                             if sl_order and (sl_order.get('algoId') or sl_order.get('ordId')):
                                 self.position_exit_orders['sl'] = sl_order.get('algoId') or sl_order.get('ordId')
-                                self.log(f"✓ New SL algo order placed for {actual_side} position", level="info")
+                                self.log(f"🎯 SL Order Set: {new_sl:.{price_precision}f} ({trig_px_type} price)", level="info")
                             else:
-                                self.log(f"CRITICAL: New SL algo order failed for {actual_side} position!", level="error")
+                                self.log(f"❌ SL Placement Failed!", level="error")
                             
                             self.current_take_profit = new_tp
                             self.current_stop_loss = new_sl
@@ -2243,10 +2298,10 @@ class TradingBotEngine:
                             time.sleep(0.1)
 
             if cancelled_count > 0:
-                self.log(f"Successfully cancelled {cancelled_count} pending orders (Limit & Algo).", level="info")
+                self.log(f"✅ Cancelled {cancelled_count} pending orders.", level="info")
                 self.emit('success', {'message': f'Successfully cancelled {cancelled_count} pending orders.'})
             else:
-                self.log("No pending orders found to cancel.", level="warning")
+                self.log("No orders to cancel.", level="warning")
                 self.emit('warning', {'message': 'No pending orders found to cancel.'})
 
         except Exception as e:
