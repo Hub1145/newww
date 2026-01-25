@@ -2,7 +2,8 @@ const socket = io();
 
 let currentConfig = null;
 const configModal = new bootstrap.Modal(document.getElementById('configModal'));
-let isBotRunning = false; // Initialize bot running status
+let isBotRunning = false;
+let orderExpirationCache = {}; // Cache to store calcualted expiration timestamps
 
 document.addEventListener('DOMContentLoaded', () => {
     initializeTheme();
@@ -10,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         setupSocketListeners();
         loadStatus(); // Load initial status after listeners are set up
+        startUITimers(); // Start local countdown ticks
     });
 });
 
@@ -438,11 +440,19 @@ function updateOpenTrades(trades) {
         return;
     }
 
-    tradesContainer.innerHTML = trades.map(trade => `
+    tradesContainer.innerHTML = trades.map(trade => {
+        // Cache the expiration target timestamp to avoid server stutter
+        if (trade.time_left !== null) {
+            orderExpirationCache[trade.id] = Date.now() + (trade.time_left * 1000);
+        } else {
+            delete orderExpirationCache[trade.id];
+        }
+
+        return `
         <div class="trade-card ${trade.type.toLowerCase()}">
             <div class="trade-header">
                 <span class="trade-type ${trade.type.toLowerCase()}">${trade.type}</span>
-                <span class="trade-id">ID: ${trade.id}</span>
+                <span class="trade-id">ID: ${trade.id} <span class="badge bg-warning text-dark ms-1 timer-badge" data-order-id="${trade.id}">${trade.time_left !== null ? trade.time_left + 's' : ''}</span></span>
             </div>
             <div class="trade-details">
                 <div class="trade-detail-item">
@@ -463,7 +473,28 @@ function updateOpenTrades(trades) {
                 </div>
             </div>
         </div>
-    `).join('');
+    `;
+    }).join('');
+}
+
+function startUITimers() {
+    // Precise local countdown timer
+    setInterval(() => {
+        const now = Date.now();
+        const badges = document.querySelectorAll('.timer-badge');
+        badges.forEach(badge => {
+            const orderId = badge.getAttribute('data-order-id');
+            const targetTime = orderExpirationCache[orderId];
+
+            if (targetTime) {
+                const remaining = Math.max(0, Math.floor((targetTime - now) / 1000));
+                badge.textContent = remaining + 's';
+
+                // Cleanup cache if reached 0
+                if (remaining <= 0) delete orderExpirationCache[orderId];
+            }
+        });
+    }, 1000);
 }
 
 function addConsoleLog(log) {

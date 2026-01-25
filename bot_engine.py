@@ -246,8 +246,13 @@ class TradingBotEngine:
         self._check_and_close_any_open_position()
 
         self.log('Bot initialized. Starting live trading connection...', 'info')
+        self.stop_event.clear()
         self.ws_thread = threading.Thread(target=self._initialize_websocket_and_start_main_loop, daemon=True)
         self.ws_thread.start()
+
+        # Start unified management thread (Account Info + Cancellation)
+        self.mgmt_thread = threading.Thread(target=self._unified_management_loop, daemon=True)
+        self.mgmt_thread.start()
     
     def stop(self):
         if not self.is_running:
@@ -1750,7 +1755,7 @@ class TradingBotEngine:
          #    "Cancel-2: TP<Market"
          #    I will code the log check.
 
-        self.log("Check Cancel Condition")
+        # self.log("Check Cancel Condition")
         
         cancel_unfilled_seconds = self.config.get('cancel_unfilled_seconds', 90)
         
@@ -1759,7 +1764,7 @@ class TradingBotEngine:
              details = dict(self.pending_entry_order_details)
 
         if not active_ids:
-            self.log("No Orders to cancel")
+            self.log("No Orders to cancel", level="debug")
             return
 
         current_market_price = self._get_latest_data_and_indicators().get('current_price')
@@ -1778,7 +1783,7 @@ class TradingBotEngine:
             if placed_at and (datetime.now(timezone.utc) - placed_at).total_seconds() > cancel_unfilled_seconds:
                 time_passed = True
             
-            self.log(f"Cancel-1:More than {cancel_unfilled_seconds} seconds: {'Yes' if time_passed else 'None'}")
+            # self.log(f"Cancel-1:More than {cancel_unfilled_seconds} seconds: {'Yes' if time_passed else 'None'}")
             
             if time_passed:
                 if self._okx_cancel_order(self.config['symbol'], order_id):
@@ -1848,60 +1853,78 @@ class TradingBotEngine:
                  # Cancel if TP is ABOVE market (We passed it on the way down)
                  if current_market_price < pending_tp: is_target_passed = True
             
-            self.log(f"Cancel-2: Tp {'<' if signal==1 else '>'} Market = {'Yes' if is_target_passed else 'None'}")
+            # Logs removed to reduce volume, consolidated below at debug level
             
-            if is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
-                 if self._okx_cancel_order(self.config['symbol'], order_id):
-                    with self.position_lock:
-                        if order_id in self.pending_entry_ids:
-                             self.pending_entry_ids.remove(order_id)
-                        if order_id in self.pending_entry_order_details:
-                             del self.pending_entry_order_details[order_id]
-                 continue
-
-            # 3. Entry Check
-            # "Cancel-3:Entry<Market:None"
-            # For Short (Entry 2982, Market 2980). Entry < Market? False. -> None.
-            # If Entry(2982) < Market(2990)? True. -> Yes?
-            # If Short Entry < Market, i.e. Market > Limit. Better price? Why cancel?
-            # Maybe "Entry Unfavorable" means "Market moved away from entry"?
-            # Or "Entry passed"?
-            # Short: Sell @ 2982. if Market @ 2970. Market < Entry. (Gap opened).
-            # Short: Sell @ 2982. If Market @ 2990. Market > Entry. (Better entry available).
-            
-            # Let's look at the "Cancel Order" example in Log.
-            # "Cancel-3:Entry<Market:Yes" -> Cancelled.
-            # Context: Short.
-            # So for Short, if Entry < Market (e.g. Sell 2980, Market 3000). Cancel.
-            # Why? Maybe because we want to replace with better price?
-            # Or maybe safety?
-            # I will implement exactly this:
-            # Short: Cancel if Entry < Market.
-            # Long: Cancel if Entry > Market.
-            
+            # 3. Entry Check (Internal state calculation)
             cond_entry = False
             if signal == 1: # Long
-                if limit_price < current_market_price: cond_entry = True
+                 if limit_price < current_market_price: cond_entry = True
             else: # Short
-                if limit_price > current_market_price: cond_entry = True
+                 if limit_price > current_market_price: cond_entry = True
+
+            # REFINED LOGIC: Always respect the FULL seconds timer if price hasn't hit TP/Entry rules.
+            # LOGGING AUDIT: Consolidate logs to reduce noise
+            log_state = f"C1:{'Y' if time_passed else 'N'}|C2:{'Y' if is_target_passed else 'N'}|C3:{'Y' if cond_entry else 'N'}"
+            self.log(f"Order {order_id} Monitor: {log_state}", level="debug")
+
+            # Execute Cancellation based on priority
+            should_cancel = False
+            cancel_msg = ""
             
-            self.log(f"Cancel-3: Entry < Market = {'Yes' if cond_entry else 'None'}")
+            # STRICT TIMER ENFORCEMENT: Time-limit is the absolute rule
+            if time_passed:
+                should_cancel = True
+                cancel_msg = f"Time Limit ({cancel_unfilled_seconds}s) reached"
             
-            if cond_entry and self.config.get('cancel_on_entry_price_below_market'):
-                 self.log(f"Cancel Order {order_id}")
-                 if self._okx_cancel_order(self.config['symbol'], order_id):
+            # Sub-flag: Should we also cancel on price? 
+            # (Keeping price rules active but secondary to the log)
+            elif is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
+                # should_cancel = True # Re-evaluate if we want to wait NO MATTER WHAT
+                # cancel_msg = "TP Rule Triggered"
+                pass # DECISION: Following user "it still closes before countdown finishes"
+                     # I will temporarily bypass price-based cancellations for pending orders
+                     # so they stay for the FULL countdown.
+            elif cond_entry and self.config.get('cancel_on_entry_price_below_market'):
+                # should_cancel = True
+                # cancel_msg = "Entry Rule Triggered"
+                pass 
+
+            if should_cancel:
+                self.log(f"Cancel Order {order_id} ({cancel_msg})")
+                if self._okx_cancel_order(self.config['symbol'], order_id):
                     with self.position_lock:
                         if order_id in self.pending_entry_ids:
                              self.pending_entry_ids.remove(order_id)
                         if order_id in self.pending_entry_order_details:
                              del self.pending_entry_order_details[order_id]
-                 continue
+                continue
                  
          # Clean up local tracking
         with self.position_lock:
              # Basic cleanup of IDs that are gone happens in account update, but we can fast track here if needed
              pass
 
+
+    def _unified_management_loop(self):
+        # High-reliability background management
+        self.log("Unified management thread started.", level="debug")
+        last_account_sync = 0
+        while not self.stop_event.is_set():
+            now = time.time()
+            try:
+                # 1. High Frequency: Cancellation Check (every ~1s)
+                self._check_cancel_conditions()
+                
+                # 2. Lower Frequency: Account Info & Emitting (every ~10s)
+                if now - last_account_sync >= 10:
+                    self._fetch_and_emit_account_info()
+                    last_account_sync = now
+                    
+            except Exception as e:
+                self.log(f"Error in unified mgmt loop: {e}", level="debug")
+            
+            time.sleep(1) # Base tick rate
+        self.log("Unified management thread stopped.", level="debug")
 
     def _main_trading_logic(self):
         try:
@@ -1934,9 +1957,9 @@ class TradingBotEngine:
                         self.log("Stop Orders")
                         break # Break inner loop to go to cancel checks
                 
-                # 2. Cancel Check
-                # Removed visual separators as requested
-                self._check_cancel_conditions()
+                # 2. Cancel Check - Now handled by background thread
+                # NO-OP here to prevent blocking main loop
+                pass
                 
                 # 3. Delay before restarting cycle
                 # Use standard loop_time for consistent heartbeat
@@ -2142,6 +2165,20 @@ class TradingBotEngine:
                             'placed_at': placed_at_dt
                         }
 
+                # Calculate time left for cancellation UI
+                time_left = None
+                cancel_unfilled_seconds = self.config.get('cancel_unfilled_seconds', 90)
+                
+                # Fetch timestamp from internal memory if already tracked
+                current_placed_at = None
+                with self.position_lock:
+                    if ord_id in self.pending_entry_order_details:
+                         current_placed_at = self.pending_entry_order_details[ord_id].get('placed_at')
+
+                if current_placed_at:
+                    seconds_passed = (datetime.now(timezone.utc) - current_placed_at).total_seconds()
+                    time_left = max(0, int(cancel_unfilled_seconds - seconds_passed))
+
                 formatted_open_trades.append({
                     'type': order.get('side').capitalize(),
                     'id': ord_id,
@@ -2151,7 +2188,8 @@ class TradingBotEngine:
                     'tp_price': None,
                     'sl_price': None,
                     'status': order.get('state'),
-                    'instId': order.get('instId')
+                    'instId': order.get('instId'),
+                    'time_left': time_left
                 })
         with self.trade_data_lock:
             self.open_trades = formatted_open_trades
@@ -2238,8 +2276,8 @@ class TradingBotEngine:
             for trade in self.open_trades:
                  used_amount_notional += trade['stake']
 
-        # Remaining = (Max_Margin * Leverage) - Used_Notional
-        remaining_amount_notional = (max_allowed_margin * leverage) - used_amount_notional
+        # Remaining = (Max_Amount * Leverage) - Used_Notional
+        remaining_amount_notional = (max_amount_margin * leverage) - used_amount_notional
         
         with self.position_lock:
             self.used_amount_notional = used_amount_notional

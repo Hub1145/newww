@@ -95,17 +95,21 @@ body {
 
 .stat-label {
     color: var(--text-secondary);
-    font-size: 0.875rem;
-    font-weight: 500;
-    margin-bottom: 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-bottom: 0.15rem;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    display: block;
 }
 
 .stat-value {
     color: var(--text-primary);
-    font-size: 1.75rem;
+    font-size: 1.5rem;
     font-weight: 700;
+    line-height: 1;
+    word-break: break-all;
+    display: block;
 }
 
 .metric-item {
@@ -428,7 +432,7 @@ body {
     .navbar-brand {
         font-size: 1.1rem;
     }
-    
+
     .navbar .container-fluid {
         padding-left: 0.5rem;
         padding-right: 0.5rem;

@@ -175,8 +175,9 @@ def handle_connect(sid):
             # Max Amount Display -> Max Allowed (Unleveraged) / Divisor
             max_amount_display = max_allowed_margin / rate_divisor
 
-            # Remaining Logic: (Max Allowed * Leverage) - Used Notional
-            max_notional_capacity = max_allowed_margin * leverage
+            # Remaining Logic: (Max Amount * Leverage) - Used Notional
+            # Max Amount is the display value (max_allowed / divisor)
+            max_notional_capacity = max_amount_display * leverage
             
             # Use the used_amount_notional tracked by bot_engine which sums up positions
             used_amount_notional = 0.0
@@ -287,4 +288,4 @@ def handle_emergency_sl(data=None):
 
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True)
