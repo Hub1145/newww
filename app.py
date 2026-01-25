@@ -172,6 +172,9 @@ def handle_connect(sid):
             leverage = float(bot_engine.config.get('leverage', 1)) 
             if leverage <= 0: leverage = 1
             
+            # Max Amount Display -> Max Allowed (Unleveraged) / Divisor
+            max_amount_display = max_allowed_margin / rate_divisor
+
             # Remaining Logic: (Max Allowed * Leverage) - Used Notional
             max_notional_capacity = max_allowed_margin * leverage
             
@@ -284,4 +287,4 @@ def handle_emergency_sl(data=None):
 
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True)
