@@ -1840,10 +1840,15 @@ class TradingBotEngine:
             # For Long: Market > TP.
             
             is_target_passed = False
-            if signal == 1 and current_market_price > pending_tp: is_target_passed = True
-            if signal == -1 and current_market_price < pending_tp: is_target_passed = True
+            # REVERSED: Based on user feedback "Reverse" and "Not market below tp, But tp below market"
+            if signal == 1: # Long
+                 # Cancel if TP is BELOW market (We passed it)
+                 if current_market_price > pending_tp: is_target_passed = True
+            else: # Short
+                 # Cancel if TP is ABOVE market (We passed it on the way down)
+                 if current_market_price < pending_tp: is_target_passed = True
             
-            self.log(f"Cancel-2: Tp < Market = {'Yes' if is_target_passed else 'None'}")
+            self.log(f"Cancel-2: Tp {'<' if signal==1 else '>'} Market = {'Yes' if is_target_passed else 'None'}")
             
             if is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
                  if self._okx_cancel_order(self.config['symbol'], order_id):
@@ -1876,9 +1881,9 @@ class TradingBotEngine:
             
             cond_entry = False
             if signal == 1: # Long
-                if limit_price > current_market_price: cond_entry = True
-            else: # Short
                 if limit_price < current_market_price: cond_entry = True
+            else: # Short
+                if limit_price > current_market_price: cond_entry = True
             
             self.log(f"Cancel-3: Entry < Market = {'Yes' if cond_entry else 'None'}")
             
@@ -2389,9 +2394,10 @@ class TradingBotEngine:
                             self.log(f"⚠️ Market ({current_market_price}) above TP ({new_tp}). Adjusting to trigger immediately.", level="warning")
                             new_tp = current_market_price + price_tick
                     else: # short
-                        if current_market_price <= new_tp:
-                            self.log(f"⚠️ Market ({current_market_price}) below TP ({new_tp}). Adjusting to trigger immediately.", level="warning")
-                            new_tp = current_market_price - price_tick
+                        # REVERSED: Based on user log image "Reverse"
+                        if current_market_price >= new_tp:
+                            self.log(f"⚠️ Market ({current_market_price}) above TP ({new_tp}). Adjusting to trigger immediately.", level="warning")
+                            new_tp = current_market_price + price_tick
 
                         with self.position_lock:
                             # 1. Fetch ALL active algo orders for this symbol from OKX to be safe
