@@ -32,10 +32,6 @@ def emit_to_client(event, data):
 def favicon():
     return app.send_static_file('favicon.ico')
 
-@app.before_request
-def log_config_on_request():
-    if request.path.startswith('/api/config'):
-        config = load_config()
 
 @app.route('/')
 def index():
@@ -176,26 +172,25 @@ def handle_connect(sid):
             leverage = float(bot_engine.config.get('leverage', 1)) 
             if leverage <= 0: leverage = 1
             
-            max_amount_margin = max_allowed_margin / rate_divisor
-
-            used_amount_notional = 0.0
-            if bot_engine.in_position:
-                # We use target_order_amount (Margin) * Leverage for an approximation
-                used_amount_notional = bot_engine.config['target_order_amount'] * leverage
-            elif bot_engine.pending_entry_order_id:
-                used_amount_notional = bot_engine.config['target_order_amount'] * leverage
+            # Remaining Logic: (Max Allowed * Leverage) - Used Notional
+            max_notional_capacity = max_allowed_margin * leverage
             
-            remaining_amount_notional = (max_allowed_margin * leverage) - used_amount_notional
+            # Use the used_amount_notional tracked by bot_engine which sums up positions
+            used_amount_notional = 0.0
+            with bot_engine.position_lock:
+                 used_amount_notional = bot_engine.used_amount_notional
+
+            remaining_amount_notional = max_notional_capacity - used_amount_notional
 
         emit('account_update', {
             'total_capital': bot_engine.initial_total_capital or total_balance,
             'max_allowed_used_display': max_allowed_margin, # Unleveraged
-            'max_amount_display': max_amount_margin,        # Unleveraged
+            'max_amount_display': max_amount_display,       # Unleveraged
             'used_amount': used_amount_notional,            # Leveraged
             'remaining_amount': remaining_amount_notional,  # Leveraged
             'total_balance': total_balance,
             'available_balance': available_balance,
-            'net_profit': 0.0,
+            'net_profit': bot_engine.net_profit,
             'total_trades': len(bot_engine.open_trades)
         }, room=sid)
         
@@ -289,4 +284,4 @@ def handle_emergency_sl(data=None):
 
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True)
