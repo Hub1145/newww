@@ -93,6 +93,9 @@ function setupEventListeners() {
     document.getElementById('pnlAutoCancelThreshold').addEventListener('change', () => {
         saveLiveConfigs();
     });
+    document.getElementById('tradeFeePercentage').addEventListener('change', () => {
+        saveLiveConfigs();
+    });
 
     document.getElementById('testApiKeyBtn').addEventListener('click', testApiKey);
 }
@@ -251,6 +254,7 @@ function updateAccountMetrics(data) {
     document.getElementById('maxAllowedUsedDisplay').textContent = `$${data.max_allowed_used_display !== undefined ? data.max_allowed_used_display.toFixed(2) : '0.00'}`;
     document.getElementById('maxAmountDisplay').textContent = `$${data.max_amount_display !== undefined ? data.max_amount_display.toFixed(2) : '0.00'}`;
     document.getElementById('usedAmount').textContent = `$${data.used_amount !== undefined ? data.used_amount.toFixed(2) : '0.00'}`;
+    document.getElementById('tradeFees').textContent = `$${data.trade_fees !== undefined ? data.trade_fees.toFixed(2) : '0.00'}`;
     document.getElementById('remainingAmount').textContent = `$${data.remaining_amount !== undefined ? data.remaining_amount.toFixed(2) : '0.00'}`;
     document.getElementById('balance').textContent = `$${data.total_balance !== undefined ? data.total_balance.toFixed(2) : '0.00'}`;
     document.getElementById('netProfit').textContent = `$${data.net_profit !== undefined ? data.net_profit.toFixed(2) : '0.00'}`;
@@ -258,35 +262,55 @@ function updateAccountMetrics(data) {
 }
 
 function updatePositionDisplay(positionData) {
-    const mlResultsContainer = document.getElementById('mlStrategyResults'); // This is for Current Position card
+    const mlResultsContainer = document.getElementById('mlStrategyResults');
 
-    if (!positionData || !positionData.in_position) {
+    if (!positionData || (!positionData.in_position && (!positionData.positions || (!positionData.positions.long.in && !positionData.positions.short.in)))) {
         mlResultsContainer.innerHTML = '<p class="text-muted">No active position.</p>';
         return;
     }
 
-    let positionHtml = `
-        <div class="param-item">
-            <span class="param-label">In Position:</span>
-            <span class="param-value text-success">Yes</span>
-        </div>
-        <div class="param-item">
-            <span class="param-label">Entry Price:</span>
-            <span class="param-value">${positionData.position_entry_price.toFixed(4)}</span>
-        </div>
-        <div class="param-item">
-            <span class="param-label">Quantity:</span>
-            <span class="param-value">${positionData.position_qty.toFixed(4)}</span>
-        </div>
-        <div class="param-item">
-            <span class="param-label">Current TP:</span>
-            <span class="param-value text-success">${positionData.current_take_profit.toFixed(4)}</span>
-        </div>
-        <div class="param-item">
-            <span class="param-label">Current SL:</span>
-            <span class="param-value text-danger">${positionData.current_stop_loss.toFixed(4)}</span>
-        </div>
-    `;
+    let positionsToRender = [];
+
+    if (positionData.positions) {
+        if (positionData.positions.long.in) {
+            positionsToRender.push({ side: 'LONG', ...positionData.positions.long });
+        }
+        if (positionData.positions.short.in) {
+            positionsToRender.push({ side: 'SHORT', ...positionData.positions.short });
+        }
+    } else if (positionData.in_position) {
+        // Fallback for older data format or primary display
+        positionsToRender.push({
+            side: (positionData.position_qty > 0 ? 'LONG' : 'SHORT'),
+            price: positionData.position_entry_price,
+            qty: positionData.position_qty,
+            tp: positionData.current_take_profit,
+            sl: positionData.current_stop_loss
+        });
+    }
+
+    let positionHtml = '';
+    positionsToRender.forEach(pos => {
+        positionHtml += `
+            <div class="position-card mb-2 p-2 border rounded ${pos.side.toLowerCase()}-bg">
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <h6 class="mb-0 text-${pos.side === 'LONG' ? 'success' : 'danger'} font-weight-bold">${pos.side} POSITION</h6>
+                    <span class="badge bg-${pos.side === 'LONG' ? 'success' : 'danger'}">Active</span>
+                </div>
+                <div class="row g-0">
+                    <div class="col-6 small text-muted">Entry Price:</div>
+                    <div class="col-6 small text-end">${pos.price.toFixed(4)}</div>
+                    <div class="col-6 small text-muted">Quantity:</div>
+                    <div class="col-6 small text-end">${pos.qty.toFixed(4)}</div>
+                    <div class="col-6 small text-muted">Current TP:</div>
+                    <div class="col-6 small text-end text-success">${(pos.tp || positionData.current_take_profit || 0).toFixed(4)}</div>
+                    <div class="col-6 small text-muted">Current SL:</div>
+                    <div class="col-6 small text-end text-danger">${(pos.sl || positionData.current_stop_loss || 0).toFixed(4)}</div>
+                </div>
+            </div>
+        `;
+    });
+
     mlResultsContainer.innerHTML = positionHtml;
 }
 
@@ -378,10 +402,14 @@ function updateParametersDisplay() {
                <span class="param-label">TP Type:</span>
                <span class="param-value">${currentConfig.tp_type}</span>
            </div>
-           <div class="param-item">
-               <span class="param-label">Cancel Unfilled (s):</span>
-               <span class="param-value">${currentConfig.cancel_unfilled_seconds}</span>
-           </div>
+            <div class="param-item">
+                <span class="param-label">Trade Fee %:</span>
+                <span class="param-value">${currentConfig.trade_fee_percentage}%</span>
+            </div>
+            <div class="param-item">
+                <span class="param-label">Cancel Unfilled (s):</span>
+                <span class="param-value">${currentConfig.cancel_unfilled_seconds}</span>
+            </div>
            <div class="param-item">
                <span class="param-label">Cancel if TP unfavorable:</span>
                <span class="param-value">${currentConfig.cancel_on_tp_price_below_market ? 'Yes' : 'No'}</span>
@@ -552,6 +580,12 @@ async function loadConfig() {
         if (currentConfig.pnl_auto_cancel_threshold !== undefined) {
             document.getElementById('pnlAutoCancelThreshold').value = currentConfig.pnl_auto_cancel_threshold;
         }
+
+        // Initial dashboard trade fee % sync
+        const feeInput = document.getElementById('tradeFeePercentage');
+        if (feeInput) {
+            feeInput.value = currentConfig.trade_fee_percentage !== undefined ? currentConfig.trade_fee_percentage : 0.07;
+        }
     } catch (error) {
         console.error('Error loading config:', error);
         showNotification('Failed to load configuration', 'error');
@@ -600,6 +634,7 @@ function loadConfigToModal() {
     document.getElementById('cancelUnfilledSeconds').value = currentConfig.cancel_unfilled_seconds;
     document.getElementById('cancelOnTpPriceBelowMarket').checked = currentConfig.cancel_on_tp_price_below_market;
     document.getElementById('cancelOnEntryPriceBelowMarket').checked = currentConfig.cancel_on_entry_price_below_market;
+    document.getElementById('tradeFeePercentage').value = currentConfig.trade_fee_percentage || 0.07;
 
     // New fields
     document.getElementById('direction').value = currentConfig.direction;
@@ -622,6 +657,7 @@ function loadConfigToModal() {
     document.getElementById('minChgHighClose').value = currentConfig.min_chg_high_close;
     document.getElementById('maxChgHighClose').value = currentConfig.max_chg_high_close;
     document.getElementById('candlestickTimeframe').value = currentConfig.candlestick_timeframe;
+    document.getElementById('okxPosMode').value = currentConfig.okx_pos_mode || 'net_mode';
 
     // PnL Auto-Cancel (Modal Sync)
     const autCancelCheck = document.getElementById('usePnlAutoCancelModal');
@@ -669,6 +705,7 @@ async function saveConfig() {
         cancel_unfilled_seconds: parseInt(document.getElementById('cancelUnfilledSeconds').value),
         cancel_on_tp_price_below_market: document.getElementById('cancelOnTpPriceBelowMarket').checked,
         cancel_on_entry_price_below_market: document.getElementById('cancelOnEntryPriceBelowMarket').checked,
+        trade_fee_percentage: parseFloat(document.getElementById('tradeFeePercentage').value),
 
         // New fields
         direction: document.getElementById('direction').value,
@@ -691,6 +728,7 @@ async function saveConfig() {
         min_chg_high_close: parseFloat(document.getElementById('minChgHighClose').value),
         max_chg_high_close: parseFloat(document.getElementById('maxChgHighClose').value),
         candlestick_timeframe: document.getElementById('candlestickTimeframe').value,
+        okx_pos_mode: document.getElementById('okxPosMode').value,
 
         // PnL Auto-Cancel
         use_pnl_auto_cancel: document.getElementById('usePnlAutoCancel').checked,
@@ -728,7 +766,8 @@ async function saveLiveConfigs() {
 
     const liveConfig = {
         use_pnl_auto_cancel: document.getElementById('usePnlAutoCancel').checked,
-        pnl_auto_cancel_threshold: parseFloat(document.getElementById('pnlAutoCancelThreshold').value)
+        pnl_auto_cancel_threshold: parseFloat(document.getElementById('pnlAutoCancelThreshold').value),
+        trade_fee_percentage: parseFloat(document.getElementById('tradeFeePercentage').value)
     };
 
     try {
@@ -745,10 +784,12 @@ async function saveLiveConfigs() {
             // Update local currentConfig but don't reload everything
             currentConfig.use_pnl_auto_cancel = liveConfig.use_pnl_auto_cancel;
             currentConfig.pnl_auto_cancel_threshold = liveConfig.pnl_auto_cancel_threshold;
+            currentConfig.trade_fee_percentage = liveConfig.trade_fee_percentage;
         } else {
             // Revert UI on error (e.g. bot running error)
             document.getElementById('usePnlAutoCancel').checked = currentConfig.use_pnl_auto_cancel;
             document.getElementById('pnlAutoCancelThreshold').value = currentConfig.pnl_auto_cancel_threshold;
+            document.getElementById('tradeFeePercentage').value = currentConfig.trade_fee_percentage;
             showNotification(data.message, 'error');
         }
     } catch (error) {

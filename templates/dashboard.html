@@ -64,7 +64,24 @@
                             <div class="d-flex align-items-center gap-2">
                                 <span class="text-secondary small text-uppercase fw-bold">Target Profit ($)</span>
                                 <input type="number" class="form-control form-control-sm" id="pnlAutoCancelThreshold"
-                                    style="width: 100px;" step="0.01">
+                                    style="width: 80px;" step="0.01">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card mb-3 border-info">
+                    <div class="card-body py-2">
+                        <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
+                            <div class="d-flex align-items-center gap-2">
+                                <div class="stat-label text-info small text-uppercase fw-bold"><i
+                                        class="bi bi-percent"></i> Trade Fees</div>
+                                <div class="stat-value text-info fw-bold ms-2" id="tradeFees">$0.00</div>
+                            </div>
+                            <div class="d-flex align-items-center gap-2">
+                                <span class="text-secondary small text-uppercase fw-bold">Trade Fee (%)</span>
+                                <input type="number" class="form-control form-control-sm" id="tradeFeePercentage"
+                                    style="width: 80px;" step="0.001">
                             </div>
                         </div>
                     </div>
@@ -295,6 +312,15 @@
                                 data-bs-parent="#configAccordion">
                                 <div class="accordion-body">
                                     <div class="mb-3">
+                                        <label class="form-label">Account Mode</label>
+                                        <select class="form-select" id="okxPosMode">
+                                            <option value="net_mode">One-Way Mode (Net)</option>
+                                            <option value="long_short_mode">Hedge Mode (Long/Short)</option>
+                                        </select>
+                                        <div class="form-text text-warning small">Note: Switching mode requires no open
+                                            positions.</div>
+                                    </div>
+                                    <div class="mb-3">
                                         <label class="form-label">Short Safety Line Price</label>
                                         <input type="number" class="form-control" id="shortSafetyLinePrice" step="0.01">
                                     </div>
@@ -339,6 +365,7 @@
                                         <select class="form-select" id="direction">
                                             <option value="short">Short</option>
                                             <option value="long">Long</option>
+                                            <option value="both">Both</option>
                                         </select>
                                     </div>
                                     <div class="mb-3">

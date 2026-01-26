@@ -141,20 +141,24 @@ class TradingBotEngine:
         self.initial_total_capital = 0.0 # Session-based, in-memory only
         self.account_info_lock = threading.Lock()
         self.net_profit = 0.0 # Track actual PnL
-        self.in_position = False
-        self.position_entry_price = 0.0
-        self.position_qty = 0.0
+        
+        # Refactored for Dual-Direction Support
+        self.in_position = {'long': False, 'short': False}
+        self.position_entry_price = {'long': 0.0, 'short': 0.0}
+        self.position_qty = {'long': 0.0, 'short': 0.0}
+        self.current_stop_loss = {'long': 0.0, 'short': 0.0}
+        self.current_take_profit = {'long': 0.0, 'short': 0.0}
+        self.position_exit_orders = {'long': {}, 'short': {}} # { 'long': {'tp': id, 'sl': id}, ... }
+        self.entry_reduced_tp_flag = {'long': False, 'short': False}
+        
         self.batch_counter = 0 # Track batches for logging
-        self.current_stop_loss = 0.0
-        self.current_take_profit = 0.0
         self.used_amount_notional = 0.0
         self.position_lock = threading.Lock()
         self.pending_entry_ids = [] # List to track multiple pending entry orders
         self.pending_entry_order_id = None # Kept for backward compatibility/single tracking if needed
         self.pending_entry_order_details = {} # Now will store details per order ID in a dict
-        self.position_exit_orders = {}
-        self.entry_reduced_tp_flag = False
-        self.entry_sl_price = 0.0
+        self.entry_sl_price = 0.0 # This might need migration too if we have concurrent entries? 
+                                  # Entries are usually batch-based and transient. 
         self.sl_hit_triggered = False
         self.sl_hit_lock = threading.Lock()
         self.entry_order_with_sl = None
@@ -237,7 +241,29 @@ class TradingBotEngine:
             self.emit('bot_status', {'running': False})
             return
  
-        if not self._okx_set_leverage(self.config['symbol'], self.config['leverage']):
+        # 1. Position Mode Sync (Must happen BEFORE leverage)
+        target_pos_mode = self.config.get('okx_pos_mode', 'net_mode')
+        if not self._okx_set_position_mode(target_pos_mode):
+             self.log("Failed to verify/set position mode. Exiting.", 'error')
+             self.is_running = False
+             self.emit('bot_status', {'running': False})
+             return
+
+        # 2. Leverage Sync (Requires posSide in Hedge Mode)
+        lev_val = self.config.get('leverage', 20)
+        symbol = self.config['symbol']
+        lev_success = False
+        
+        if target_pos_mode == 'long_short_mode':
+            # Set for both sides in hedge mode
+            l_ok = self._okx_set_leverage(symbol, lev_val, pos_side="long")
+            s_ok = self._okx_set_leverage(symbol, lev_val, pos_side="short")
+            lev_success = l_ok and s_ok
+        else:
+            # Set for net side in one-way mode
+            lev_success = self._okx_set_leverage(symbol, lev_val, pos_side="net")
+
+        if not lev_success:
             self.log("Failed to set leverage. Exiting.", 'error')
             self.is_running = False
             self.emit('bot_status', {'running': False})
@@ -534,26 +560,49 @@ class TradingBotEngine:
             self.log(f"Exception in fetch_product_info: {e}", level="error")
             return False
 
-    def _okx_set_leverage(self, symbol, leverage_val):
+    def _okx_set_leverage(self, symbol, leverage_val, pos_side="net"):
         try:
             path = "/api/v5/account/set-leverage"
             body = {
                 "instId": symbol,
                 "lever": str(int(leverage_val)),
-                "mgnMode": self.config.get('mode', 'cross') # Use mode from config
+                "mgnMode": self.config.get('mode', 'cross'), # Use mode from config
+                "posSide": pos_side
             }
 
-            self.log(f"Setting leverage to {leverage_val}x for {symbol}", level="debug")
+            self.log(f"Setting leverage to {leverage_val}x for {symbol} ({pos_side})", level="debug")
             response = self._okx_request("POST", path, body_dict=body)
 
             if response and response.get('code') == '0':
-                self.log(f"✓ Leverage set to {leverage_val}x for {symbol}", level="info")
+                self.log(f"✓ Leverage set to {leverage_val}x for {symbol} ({pos_side})", level="info")
                 return True
             else:
                 self.log(f"Failed to set leverage for {symbol}: {response.get('msg') if response else 'No response'}", level="error")
                 return False
         except Exception as e:
             self.log(f"Exception in okx_set_leverage: {e}", level="error")
+            return False
+
+    def _okx_set_position_mode(self, mode_val):
+        try:
+            # Mode options: 'net_mode' (One-way) or 'long_short_mode' (Hedge)
+            path = "/api/v5/account/set-position-mode"
+            body = {"posMode": mode_val}
+            
+            self.log(f"Setting account position mode to {mode_val}...", level="debug")
+            response = self._okx_request("POST", path, body_dict=body)
+            
+            if response and response.get('code') == '0':
+                self.log(f"✓ Position mode set to {mode_val}", level="info")
+                return True
+            elif response and response.get('code') == '51000': # Already in this mode
+                self.log(f"✓ Position mode already confirmed: {mode_val}", level="debug")
+                return True
+            else:
+                self.log(f"Failed to set position mode: {response.get('msg') if response else 'No response'}", level="error")
+                return False
+        except Exception as e:
+            self.log(f"Exception in _okx_set_position_mode: {e}", level="error")
             return False
 
     def _get_ws_url(self):
@@ -718,7 +767,7 @@ class TradingBotEngine:
                 "sz": order_qty_str,
             }
 
-            if self.config.get('hedge_mode', False) and posSide:
+            if (self.config.get('hedge_mode', False) or self.config.get('okx_pos_mode') == 'long_short_mode') and posSide:
                 body["posSide"] = posSide
 
             if order_type.lower() == "limit" and price is not None:
@@ -864,13 +913,13 @@ class TradingBotEngine:
             self.log(f"Exception in _close_all_entry_orders: {e} (continuing)", level="error")
             return True
 
-    def _handle_tp_hit(self):
+    def _handle_tp_hit(self, side='long'):
         with self.tp_hit_lock:
             self.tp_hit_triggered = True # Set the flag immediately
 
         try:
             self.log("=" * 80, level="info")
-            self.log("🎯 TP HIT (0.7%) - EXECUTING PROTOCOL", level="info")
+            self.log(f"🎯 TP HIT ({side.upper()}) - EXECUTING PROTOCOL", level="info")
             self.log("=" * 80, level="info")
 
             self.log("Step 1: Closing unfilled entry orders...", level="info")
@@ -878,7 +927,7 @@ class TradingBotEngine:
 
             time.sleep(1)
 
-            self.log("Step 2: Checking OKX position status...", level="info")
+            self.log(f"Step 2: Checking {side.upper()} OKX position status...", level="info")
             path = "/api/v5/account/positions"
             params = {"instType": "SWAP", "instId": self.config['symbol']}
             response = self._okx_request("GET", path, params=params)
@@ -889,44 +938,38 @@ class TradingBotEngine:
             if response and response.get('code') == '0':
                 positions = response.get('data', [])
                 for pos in positions:
-                    if pos.get('instId') == self.config['symbol']:
-                        pos_qty_str = safe_float(pos.get('pos', '0'))
-                        size_val = safe_float(pos_qty_str)
-                        if size_val > 0:
+                    if pos.get('instId') == self.config['symbol'] and pos.get('posSide', 'net') == side:
+                        pos_qty_raw = safe_float(pos.get('pos', '0'))
+                        if abs(pos_qty_raw) > 0:
                             position_still_open = True
-                            open_qty = size_val
-                            self.log(f"OKX position still open: {open_qty} {self.config['symbol']} (partial fill)", level="info")
+                            open_qty = abs(pos_qty_raw)
+                            self.log(f"OKX {side.upper()} position still open: {open_qty} (partial fill)", level="info")
                             break
 
             if position_still_open and open_qty > 0:
-                self.log("Step 3: Waiting 3 seconds (monitoring 3 x 1-second candles)...", level="info")
-                for i in range(3):
-                    self.log(f"  [{i+1}/3 seconds elapsed]", level="info")
-                    time.sleep(1)
+                self.log("Step 3: Waiting 3 seconds for liquidity...", level="info")
+                time.sleep(3)
 
-                self.log("Step 4: Market closing remaining OKX position...", level="info")
-                exit_order_response = self._okx_place_order(self.config['symbol'], "Sell", open_qty, order_type="Market", reduce_only=True)
+                self.log(f"Step 4: Market closing remaining {side.upper()} position...", level="info")
+                close_side = "Sell" if side == 'long' else "Buy"
+                exit_order_response = self._okx_place_order(self.config['symbol'], close_side, open_qty, order_type="Market", reduce_only=True, posSide=side)
 
                 if exit_order_response and exit_order_response.get('ordId'):
-                    self.log(f"✓ Market close order placed for {open_qty} {self.config['symbol']}", level="info")
-                else:
-                    self.log(f"⚠ Market close order may have failed (OK if already closed)", level="warning")
-
+                    self.log(f"✓ Market close order placed for {open_qty} {self.config['symbol']} ({side})", level="info")
+                
                 time.sleep(1)
-                self._cancel_all_exit_orders_and_reset("TP hit - OKX position closed")
+                self._cancel_all_exit_orders_and_reset(f"TP hit - {side} closed", side=side)
             else:
-                self.log("OKX position fully closed by TP order. No market close needed.", level="info")
-                self._cancel_all_exit_orders_and_reset("TP hit - fully closed")
+                self.log(f"OKX {side.upper()} position fully closed or not found. No market close needed.", level="info")
+                self._cancel_all_exit_orders_and_reset(f"TP hit - {side} fully closed", side=side)
 
             with self.tp_hit_lock:
                 self.tp_hit_triggered = False
 
-            self.log("=" * 80, level="info")
-            self.log("✓ TP HIT PROTOCOL COMPLETE (OKX)", level="info")
-            self.log("=" * 80, level="info")
+            self.log(f"✓ {side.upper()} TP HIT PROTOCOL COMPLETE", level="info")
 
         except Exception as e:
-            self.log(f"Exception in _handle_tp_hit (OKX): {e} (continuing)", level="error")
+            self.log(f"Exception in _handle_tp_hit ({side}): {e}", level="error")
             with self.tp_hit_lock:
                 self.tp_hit_triggered = False
 
@@ -936,12 +979,7 @@ class TradingBotEngine:
             self.log("🕐 EOD EXIT TRIGGERED (OKX)", level="info")
             self.log("=" * 80, level="info")
 
-            with self.position_lock:
-                is_in_pos = self.in_position
-                pos_qty = self.position_qty
-
-            self.log("Step 1: Checking for open OKX positions...", level="info")
-
+            self.log("Step 1: Closing all open OKX positions...", level="info")
             try:
                 path = "/api/v5/account/positions"
                 params = {"instType": "SWAP", "instId": self.config['symbol']}
@@ -951,21 +989,22 @@ class TradingBotEngine:
                     positions = response.get('data', [])
                     for pos in positions:
                         if pos.get('instId') == self.config['symbol']:
-                            pos_qty_str = pos.get('pos', '0')
-                            size_val = safe_float(pos_qty_str)
-                            if size_val > 0:
-                                self.log(f"Found open long OKX position: {size_val} {self.config['symbol']} - closing...", level="info")
-                                exit_order_response = self._okx_place_order(self.config['symbol'], "Sell", size_val, order_type="Market", reduce_only=True)
+                            size_rv = safe_float(pos.get('pos', 0))
+                            if abs(size_rv) > 0:
+                                pos_side = pos.get('posSide', 'net')
+                                close_side = "Sell" if size_rv > 0 else "Buy"
+                                
+                                self.log(f"Found active {pos_side} position: {size_rv} - closing...", level="info")
+                                exit_order_response = self._okx_place_order(self.config['symbol'], close_side, abs(size_rv), order_type="Market", reduce_only=True, posSide=pos_side)
                                 if exit_order_response and exit_order_response.get('ordId'):
-                                    self.log(f"✓ Market close order placed", level="info")
+                                    self.log(f"✓ {pos_side.upper()} close order placed", level="info")
                                 else:
-                                    self.log(f"⚠ Market close failed (OK if already closed)", level="warning")
-                                time.sleep(1)
-                                break
+                                    self.log(f"⚠ {pos_side.upper()} close failed (OK if closed)", level="warning")
+                                time.sleep(0.5)
                 else:
                     self.log("No OKX positions found or API error (OK)", level="info")
             except Exception as e:
-                self.log(f"Error closing OKX position: {e} (OK, continuing)", level="warning")
+                self.log(f"Error closing OKX positions: {e} (OK, continuing)", level="warning")
 
             self.log("Step 2: Closing unfilled entry orders...", level="info")
             try:
@@ -1007,146 +1046,121 @@ class TradingBotEngine:
         with self.entry_order_sl_lock:
             tracked_entry_order = self.entry_order_with_sl
 
+    def _handle_order_update(self, orders_data):
+        with self.position_lock:
+             # Snapshot current states for directional mapping 
+             active_exit_ids = {
+                 'long': self.position_exit_orders.get('long', {}),
+                 'short': self.position_exit_orders.get('short', {})
+             }
+             pending_entry_ids = list(self.pending_entry_ids)
+             
         for order in orders_data:
-            self.log(f"DEBUG: Processing order update: {order}", level="debug")
-            if not isinstance(order, dict):
-                self.log(f"DEBUG: Skipping non-dict order update: {order}", level="debug")
-                continue
+            if not isinstance(order, dict): continue
 
             order_id = order.get('ordId') or order.get('algoId')
             status = order.get('state')
             symbol = order.get('instId')
-            cum_qty = order.get('accFillSz', 0)
-            order_qty = order.get('sz', 0)
-            exec_status = order.get('execType', '')
-            order_type = order.get('ordType', '')
+            pos_side = order.get('posSide', 'net')
+            
+            # Map side for processing
+            side_key = 'long'
+            if pos_side == 'short': side_key = 'short'
+            elif pos_side == 'net':
+                # Map net based on order contents or current config if ambiguous
+                side_key = self.config.get('direction', 'long')
+                if side_key == 'both': side_key = 'long'
 
-            self.log(f"DEBUG: Order update details - ID: {order_id}, Status: {status}, Symbol: {symbol}, CumQty: {cum_qty}, OrderQty: {order_qty}, ExecType: {exec_status}, OrderType: {order_type}", level="debug")
+            if symbol != self.config['symbol']: continue
 
-            if not order_id or not status:
-                self.log(f"DEBUG: Skipping order update due to missing order_id or status: {order}", level="debug")
-                continue
-
-            if symbol and symbol != self.config['symbol']:
-                self.log(f"DEBUG: Skipping order update due to symbol mismatch: {symbol} vs {self.config['symbol']}", level="debug")
-                continue
-
-            if active_exit_orders.get('sl') and order_id == active_exit_orders.get('sl') and status in ['filled', 'partially_filled']:
-                self.log("=" * 80, level="info")
-                self.log(f"🛑 SL HIT DETECTED via SL Order Fill!", level="info")
-                self.log(f"Order ID: {str(order_id)[:12]}... Status: {status} | ExecType: {exec_status}", level="info")
-                self.log("=" * 80, level="info")
-
+            # 1. SL HIT
+            if order_id == active_exit_ids[side_key].get('sl') and status in ['filled', 'partially_filled']:
                 with self.sl_hit_lock:
                     if not self.sl_hit_triggered:
                         self.sl_hit_triggered = True
-                        threading.Timer(0.5, self._handle_sl_hit).start()
+                        threading.Timer(0.1, lambda s=side_key: self._handle_sl_hit(side=s)).start()
                 return
 
-            if current_pending_id and order_id == current_pending_id:
+            # 2. ENTRY FILLED
+            if order_id in pending_entry_ids:
+                cum_qty = safe_float(order.get('accFillSz', 0))
                 with self.position_lock:
                     if order_id in self.pending_entry_order_details:
                         self.pending_entry_order_details[order_id]['status'] = status
                         self.pending_entry_order_details[order_id]['cum_qty'] = cum_qty
 
-                if status in ['filled', 'partially_filled'] or safe_float(cum_qty) > 0:
-                    self.log("=" * 80, level="info")
-                    self.log(f"🎉 ENTRY FILLED: {cum_qty}/{order_qty} {self.config['symbol']}", level="info")
-                    self.log("=" * 80, level="info")
-
-                    if status in ['filled']:
-                        threading.Timer(2.0, lambda: self._confirm_and_set_active_position(order_id)).start()
+                if status in ['filled', 'partially_filled'] or cum_qty > 0:
+                    self.log(f"🎉 ENTRY FILLED [{side_key.upper()}]: {cum_qty} {self.config['symbol']}", level="info")
+                    if status == 'filled':
+                        threading.Timer(2.0, lambda oid=order_id: self._confirm_and_set_active_position(oid)).start()
                     else:
-                        threading.Timer(5.0, lambda: self._confirm_and_set_active_position(order_id)).start()
+                        threading.Timer(5.0, lambda oid=order_id: self._confirm_and_set_active_position(oid)).start()
                     return
-
-                elif status in ['canceled', 'live', 'failed'] and not is_in_pos:
-                    self.log(f"❌ Entry order {status}", level="warning")
+                elif status in ['canceled', 'failed']:
                     self._reset_entry_state(f"Entry order {status}")
-                    with self.entry_order_sl_lock:
-                        self.entry_order_with_sl = None
                     return
 
-            elif is_in_pos and order_id == active_exit_orders.get('tp'):
-                if status in ['filled', 'partially_filled'] or safe_float(cum_qty) > 0:
-                    self.log("=" * 80, level="info")
-                    self.log(f"!!! TP HIT !!! {cum_qty}/{order_qty} {self.config['symbol']}", level="info")
-                    self.log("=" * 80, level="info")
-
-                    with self.tp_hit_lock:
-                        if not self.tp_hit_triggered:
-                            self.tp_hit_triggered = True
-                            threading.Timer(0.5, self._handle_tp_hit).start()
-                    return
-
+            # 3. TP HIT
+            if order_id == active_exit_ids[side_key].get('tp') and status in ['filled', 'partially_filled']:
+                with self.tp_hit_lock:
+                    if not self.tp_hit_triggered:
+                        self.tp_hit_triggered = True
+                        threading.Timer(0.1, lambda s=side_key: self._handle_tp_hit(side=s)).start()
+                return
 
     def _detect_sl_from_position_update(self, positions_msg):
-        with self.position_lock:
-            was_in_position = self.in_position
-            expected_qty = self.position_qty
-
-        if not was_in_position or expected_qty == 0:
-            return
-
-        current_position_size = 0
+        # Scan positions message for closures
         for pos in positions_msg:
             if pos.get('instId') == self.config['symbol']:
+                pos_side = pos.get('posSide', 'net')
+                side_key = 'long'
+                if pos_side == 'short': side_key = 'short'
+                elif pos_side == 'net':
+                    side_key = self.config.get('direction', 'long')
+                    if side_key == 'both': side_key = 'long'
+
                 size_rv = safe_float(pos.get('pos', 0))
-                current_position_size = size_rv
-                break
+                
+                with self.position_lock:
+                    was_in = self.in_position[side_key]
+                    exp_qty = self.position_qty[side_key]
 
-        if was_in_position and current_position_size == 0 and expected_qty > 0:
-            self.log("=" * 80, level="info")
-            self.log("🛑 SL/CLOSURE DETECTED via Position Update!", level="info")
-            self.log(f"Expected Qty: {expected_qty} → Current Qty: 0", level="info")
-            self.log("=" * 80, level="info")
-
-            with self.sl_hit_lock:
-                if not self.sl_hit_triggered:
-                    self.sl_hit_triggered = True
-                    with self.entry_order_sl_lock:
-                        self.entry_order_with_sl = None
-                    threading.Timer(0.1, self._handle_sl_hit).start()
+                if was_in and size_rv == 0 and abs(exp_qty) > 0:
+                    self.log(f"🛑 SL DETECTED [{side_key.upper()}] via WebSocket Position Update!", level="info")
+                    with self.sl_hit_lock:
+                        if not self.sl_hit_triggered:
+                            self.sl_hit_triggered = True
+                            threading.Timer(0.1, lambda s=side_key: self._handle_sl_hit(side=s)).start()
 
 
-    def _handle_sl_hit(self):
+    def _handle_sl_hit(self, side='long'):
         with self.sl_hit_lock:
             self.sl_hit_triggered = True # Set the flag immediately
 
         try:
             self.log("=" * 80, level="info")
-            self.log("🛑 STOP LOSS HIT - EXECUTING CLEANUP", level="info")
+            self.log(f"🛑 STOP LOSS HIT ({side.upper()}) - EXECUTING CLEANUP", level="info")
             self.log("=" * 80, level="info")
 
-            self.log("Position already closed by exchange SL", level="info")
+            self.log(f"{side.upper()} position already closed by exchange SL", level="info")
 
             try:
                 self._close_all_entry_orders()
-            except Exception as e:
-                self.log(f"Entry order cleanup: {e} (OK)", level="warning")
+            except: pass
 
             time.sleep(0.5)
 
-            self.log("Cancelling TP order and resetting state...", level="info")
-            self._cancel_all_exit_orders_and_reset("SL hit - position closed by exchange")
-
-            with self.entry_order_sl_lock:
-                self.entry_order_with_sl = None
+            self.log(f"Cancelling {side.upper()} TP order and resetting state...", level="info")
+            self._cancel_all_exit_orders_and_reset(f"SL hit - {side} closed by exchange", side=side)
 
             with self.sl_hit_lock:
                 self.sl_hit_triggered = False
-
-            self.log("✓ SL CLEANUP COMPLETE", level="info")
+            self.log(f"✓ {side.upper()} SL CLEANUP COMPLETE", level="info")
         except Exception as e:
-            self.log(f"Exception in _handle_sl_hit: {e}", level="error")
-            try:
-                self._cancel_all_exit_orders_and_reset("SL hit - forced reset")
-            except:
-                pass
+            self.log(f"Exception in _handle_sl_hit ({side}): {e}", level="error")
+            self._cancel_all_exit_orders_and_reset(f"SL hit - {side} forced reset", side=side)
             with self.sl_hit_lock:
                 self.sl_hit_triggered = False
-            with self.entry_order_sl_lock:
-                self.entry_order_with_sl = None
 
     def _confirm_and_set_active_position(self, filled_order_id):
         try:
@@ -1207,34 +1221,23 @@ class TradingBotEngine:
                 exit_order_side = "buy"
             
             with self.position_lock:
-                self.in_position = True
-                self.position_entry_price = actual_entry_price
-                self.position_qty = actual_qty
-                self.current_take_profit = tp_price
-                self.current_stop_loss = sl_price
+                self.in_position[actual_side] = True
+                self.position_entry_price[actual_side] = actual_entry_price
+                self.position_qty[actual_side] = actual_qty
+                self.current_take_profit[actual_side] = tp_price
+                self.current_stop_loss[actual_side] = sl_price
                 self.pending_entry_order_id = None
-                self.position_exit_orders = {}
+                self.position_exit_orders[actual_side] = {}
 
-                # Update internal state for open trades to include this new position
-                self.open_trades = [{
-                    'id': filled_order_id,
-                    'type': actual_side,
-                    'entry_spot_price': self.position_entry_price,
-                    'stake': abs(self.position_qty) * self.position_entry_price,
-                    'tp_price': self.current_take_profit,
-                    'sl_price': self.current_stop_loss,
-                    'quantity': abs(self.position_qty)
-                }]
-
-                self.emit('trades_update', {'trades': self.open_trades})
+                # Emit position update for this side
                 self.emit('position_update', {
-                    'in_position': self.in_position,
-                    'position_entry_price': self.position_entry_price,
-                    'position_qty': self.position_qty,
-                    'current_take_profit': self.current_take_profit,
-                    'current_stop_loss': self.current_stop_loss
+                    'in_position': self.in_position[actual_side],
+                    'position_entry_price': self.position_entry_price[actual_side],
+                    'position_qty': self.position_qty[actual_side],
+                    'current_take_profit': self.current_take_profit[actual_side],
+                    'current_stop_loss': self.current_stop_loss[actual_side],
+                    'side': actual_side 
                 })
-            self.log(f"DEBUG: self.in_position set to {self.in_position}", level="debug")
 
             self.log(f"OKX {actual_side.upper()} POSITION OPENED", level="info")
             self.log(f"Entry: ${actual_entry_price:.2f} | Qty: {actual_qty}", level="info")
@@ -1248,7 +1251,7 @@ class TradingBotEngine:
                 "instId": self.config['symbol'],
                 "tdMode": self.config.get('mode', 'cross'),
                 "side": exit_order_side,
-                "posSide": found_pos_side if found_pos_side else "net",
+                "posSide": actual_side, # In Hedge Mode we use actual_side, in Net it's usually net or ignored
                 "ordType": "conditional",
                 "sz": f"{(abs(actual_qty) * (self.config.get('tp_amount', 100) / 100)):.{qty_precision}f}",
                 "tpTriggerPx": f"{tp_price:.{price_precision}f}",
@@ -1260,18 +1263,18 @@ class TradingBotEngine:
             if tp_order and (tp_order.get('algoId') or tp_order.get('ordId')):
                 algo_id = tp_order.get('algoId') or tp_order.get('ordId')
                 with self.position_lock:
-                    self.position_exit_orders['tp'] = algo_id
-                self.log(f"✓ TP algo order placed at ${tp_price:.2f}", level="info")
+                    self.position_exit_orders[actual_side]['tp'] = algo_id
+                self.log(f"✓ TP algo order placed for {actual_side.upper()} at ${tp_price:.2f}", level="info")
             else:
                 self.log(f"❌ Failed to place TP algo order: {tp_order}", level="error")
-                self._execute_trade_exit("Failed to place TP")
+                self._execute_trade_exit(f"Failed to place TP for {actual_side}", side=actual_side)
                 return
 
             sl_body = {
                 "instId": self.config['symbol'],
                 "tdMode": self.config.get('mode', 'cross'),
                 "side": exit_order_side,
-                "posSide": found_pos_side if found_pos_side else "net",
+                "posSide": actual_side,
                 "ordType": "conditional",
                 "sz": f"{(abs(actual_qty) * (self.config.get('sl_amount', 100) / 100)):.{qty_precision}f}",
                 "slTriggerPx": f"{sl_price:.{price_precision}f}",
@@ -1283,52 +1286,91 @@ class TradingBotEngine:
             if sl_order and (sl_order.get('algoId') or sl_order.get('ordId')):
                 algo_id = sl_order.get('algoId') or sl_order.get('ordId')
                 with self.position_lock:
-                    self.position_exit_orders['sl'] = algo_id
-                self.log(f"✓ SL algo order placed at ${sl_price:.2f}", level="info")
+                    self.position_exit_orders[actual_side]['sl'] = algo_id
+                self.log(f"✓ SL algo order placed for {actual_side.upper()} at ${sl_price:.2f}", level="info")
             else:
                 self.log(f"❌ Failed to place SL algo order: {sl_order}", level="error")
-                self._execute_trade_exit("Failed to place SL")
+                self._execute_trade_exit(f"Failed to place SL for {actual_side}", side=actual_side)
                 return
 
         except Exception as e:
             self.log(f"Exception in _confirm_and_set_active_position (OKX): {e}", level="error")
 
 
-    def _execute_trade_exit(self, reason):
+    def _execute_trade_exit(self, reason, side=None):
         try:
-            self.log(f"=== MANUAL EXIT === Reason: {reason}", level="info")
+            self.log(f"=== EXIT === Reason: {reason} | Target: {side.upper() if side else 'ALL'}", level="info")
 
-            with self.position_lock:
-                if not self.in_position:
-                    self.log("Exit aborted: Not in position", level="warning")
-                    return
-                qty_to_close = self.position_qty
+            # Determine sides to exit
+            sides_to_exit = [side] if side else ['long', 'short']
 
-            with self.position_lock:
-                orders_to_cancel = list(self.position_exit_orders.values())
+            for s in sides_to_exit:
+                with self.position_lock:
+                    if not self.in_position[s]:
+                        if side: # Only log warning if specific side was requested
+                            self.log(f"Exit aborted for {s.upper()}: Not in position", level="warning")
+                        continue
+                    qty_to_close = self.position_qty[s]
+                    orders_to_cancel = list(self.position_exit_orders[s].values())
 
-            for order_id in orders_to_cancel:
-                if order_id:
-                    try:
-                        self._okx_cancel_algo_order(self.config['symbol'], order_id)
-                        time.sleep(0.2)
-                    except Exception as e:
-                        self.log(f"Error cancelling order: {e} (OK, continuing)", level="error")
+                # Cancel TP/SL for this side
+                for order_id in orders_to_cancel:
+                    if order_id:
+                        try:
+                            self._okx_cancel_algo_order(self.config['symbol'], order_id)
+                            time.sleep(0.1)
+                        except Exception as e:
+                            self.log(f"Error cancelling {s.upper()} order: {e} (OK, continuing)", level="error")
 
-            try:
-                self.log(f"Placing market sell for {qty_to_close} {self.config['symbol']}", level="info")
-                exit_order = self._okx_place_order(self.config['symbol'], "Sell", qty_to_close, order_type="Market", reduce_only=True)
+                try:
+                    # Determine side for market order to close
+                    # If position qty is positive (long), we SELL to close.
+                    # If position qty is negative (short), we BUY to close.
+                    close_side = "Sell" if qty_to_close > 0 else "Buy"
+                    
+                    self.log(f"Placing market {close_side.lower()} for {abs(qty_to_close)} {self.config['symbol']} (posSide: {s})", level="info")
+                    exit_order = self._okx_place_order(self.config['symbol'], close_side, abs(qty_to_close), order_type="Market", reduce_only=True, posSide=s)
 
-                if not (exit_order and exit_order.get('ordId')):
-                    self.log(f"WARNING: Market exit order may have failed (OK if already closed)", level="warning")
-            except Exception as e:
-                self.log(f"Exception during market exit: {e}", level="error")
+                    if not (exit_order and exit_order.get('ordId')):
+                        self.log(f"WARNING: Market exit for {s.upper()} failed (OK if already closed)", level="warning")
+                except Exception as e:
+                    self.log(f"Exception during {s.upper()} market exit: {e}", level="error")
 
-            time.sleep(1)
-            self._cancel_all_exit_orders_and_reset(reason)
+                time.sleep(0.5)
+                self._cancel_all_exit_orders_and_reset(reason, side=s)
+
         except Exception as e:
             self.log(f"Exception in _execute_trade_exit: {e}", level="error")
 
+    def _cancel_all_exit_orders_and_reset(self, reason, side=None):
+        # Determine sides to reset
+        sides_to_reset = [side] if side else ['long', 'short']
+        
+        with self.position_lock:
+            for s in sides_to_reset:
+                orders_to_cancel = list(self.position_exit_orders[s].values())
+
+                self.in_position[s] = False
+                self.position_entry_price[s] = 0.0
+                self.position_qty[s] = 0.0
+                self.current_take_profit[s] = 0.0
+                self.current_stop_loss[s] = 0.0
+                self.position_exit_orders[s] = {}
+                self.entry_reduced_tp_flag[s] = False
+
+                for order_id in orders_to_cancel:
+                    if order_id:
+                        try:
+                            # Note: Usually already cancelled by execute_trade_exit, but safe to retry
+                            self._okx_cancel_algo_order(self.config['symbol'], order_id)
+                        except: pass
+
+        with self.entry_order_sl_lock:
+            self.entry_order_with_sl = None
+
+        self.log("=" * 80, level="info")
+        self.log(f"STATE RESET [{side.upper() if side else 'ALL'}] - Reason: {reason}", level="info")
+        self.log("=" * 80, level="info")
     def _check_and_close_any_open_position(self):
         try:
             self.log("Checking for any open OKX positions to close...", level="debug")
@@ -1351,8 +1393,8 @@ class TradingBotEngine:
                             self.log(f"⚠️ Found open {pos_side} OKX position: {size_rv} {self.config['symbol']}", level="warning")
                             # If size_rv is negative (short), we must BUY to close
                             close_side = "Buy" if size_rv < 0 else "Sell"
-                            self.log(f"Closing {abs(size_rv)} {self.config['symbol']} with market {close_side} order", level="info")
-                            close_order = self._okx_place_order(self.config['symbol'], close_side, abs(size_rv), order_type="Market", reduce_only=True)
+                            self.log(f"Closing {abs(size_rv)} {self.config['symbol']} with market {close_side} order (posSide: {pos_side})", level="info")
+                            close_order = self._okx_place_order(self.config['symbol'], close_side, abs(size_rv), order_type="Market", reduce_only=True, posSide=pos_side)
                             if close_order and close_order.get('ordId'):
                                 self.log(f"✓ Position close order placed: {close_order.get('ordId')}", level="info")
                                 any_closed = True
@@ -1500,85 +1542,73 @@ class TradingBotEngine:
             
             if remaining_notional < min_notional_per_order:
                 self.log(f"{log_prefix}Entry-3:Remaining Capacity: {remaining_notional:.2f} < Min {min_notional_per_order}: NOT Passed", level="info")
-                return False, 0.0, None
+                return []
 
         target_amount = self.config.get('target_order_amount', 100)
 
         # 5. REAL WALLET COLLATERAL CHECK
-        # Check if the OKX account actually has enough USDT to open the next trade.
         required_margin = (target_amount / leverage)
         if self.available_balance < required_margin:
-            self.log(f"{log_prefix}Wallet-Safety: Available ${self.available_balance:.2f} < Required ${required_margin:.2f}. Insufficient Collateral in OKX Wallet.", level="warning")
-            return False, 0.0, None
+            self.log(f"{log_prefix}Wallet-Safety: Available ${self.available_balance:.2f} < Required ${required_margin:.2f}. Insufficient Collateral.", level="warning")
+            return []
 
         current_price = market_data['current_price']
-        
-        direction = self.config.get('direction', 'long')
+        direction_mode = self.config.get('direction', 'long')
         long_safety = self.config.get('long_safety_line_price', 0)
         short_safety = self.config.get('short_safety_line_price', float('inf'))
+        entry_price_offset = self.config.get('entry_price_offset', 0)
 
-        # Safety Line Logic INVERTED as per user request:
-        # SHORT: Allowed only if Market > Safety (Safety is Floor)
-        # LONG: Allowed only if Market < Safety (Safety is Ceiling)
+        valid_entries = []
         
-        long_condition = (current_price < long_safety) and (direction == 'long')
-        short_condition = (current_price > short_safety) and (direction == 'short')
+        # Possible directions to check
+        directions_to_eval = []
+        if direction_mode == 'both':
+            directions_to_eval = ['long', 'short']
+        else:
+            directions_to_eval = [direction_mode]
 
-        signal = 0
-        status_msg = ""
-        safety_price = 0.0
-        
-        if direction == 'long':
-            safety_price = long_safety
-            if long_condition:
-                signal = 1
-                status_msg = "Passed"
-            else:
-                status_msg = "NOT Passed" # Market >= Safety
-        elif direction == 'short':
-             safety_price = short_safety
-             if short_condition:
-                 signal = -1
-                 status_msg = "Passed"
-             else:
-                 status_msg = "NOT Passed" # Market <= Safety
-
-        self.log(f"{log_prefix}Entry-1:Market {current_price:.2f}, Safety:{safety_price}, for {direction.capitalize()}, {status_msg}", level="info")
-        
-        if signal == 0:
-            return False, 0.0, None
-
-        # Check candlestick conditions if enabled
+        # Shared Candlestick check (if enabled)
         candlestick_passed = True
         candlestick_msg = "Skipped"
         if self.config.get('use_candlestick_conditions', False):
             candlestick_passed, candlestick_msg = self._check_candlestick_conditions(market_data)
+
+        for d in directions_to_eval:
+            passed = False
+            signal = 0
+            safety_p = 0.0
+            limit_p = 0.0
+            
+            if d == 'long':
+                safety_p = long_safety
+                passed = (current_price < long_safety)
+                signal = 1
+                limit_p = current_price - entry_price_offset
+            else:
+                safety_p = short_safety
+                passed = (current_price > short_safety)
+                signal = -1
+                limit_p = current_price + entry_price_offset
+
+            self.log(f"{log_prefix}Entry-1:{d.upper()} Market {current_price:.2f}, Safety:{safety_p}, {'Passed' if passed else 'NOT Passed'}", level="info")
+            
+            if passed:
+                if candlestick_passed:
+                    valid_entries.append({'signal': signal, 'limit_price': limit_p, 'side': d})
+                    if candlestick_msg != "Skipped":
+                         self.log(f"{log_prefix}Entry-2:{candlestick_msg}", level="info")
+                else:
+                    self.log(f"{log_prefix}Entry-2:Candlestick {candlestick_msg}: NOT Passed", level="info")
         
-        self.log(f"{log_prefix}Entry-2:{candlestick_msg}", level="info")
+        # Log final verification for consistency if nothing passed
+        if not valid_entries:
+             return []
 
-        if not candlestick_passed:
-            return False, 0.0, None
+        # Check explicit target/min logs for the first valid one to keep user dashboard tidy
+        self.log(f"{log_prefix}Entry-3:Remaining: {remaining_notional:.2f} > Target {target_amount}: Passed", level="info")
+        self.log(f"{log_prefix}Entry-4:Remaining: {remaining_notional:.2f} > Min {min_notional_per_order}: Passed", level="info")
 
-        # Check explicit target check for log
-        # "Entry-3:Remaining:15000 >Target 1000: Passed"
-        pass_target = remaining_notional >= target_amount
-        self.log(f"{log_prefix}Entry-3:Remaining: {remaining_notional:.2f} > Target {target_amount}: {'Passed' if pass_target else 'NOT Passed'}", level="info")
-        
-        # Check explicit min check for log
-        # "Entry-4:Remaining:15000 >Min 60: Passed"
-        pass_min = remaining_notional >= min_notional_per_order
-        self.log(f"{log_prefix}Entry-4:Remaining: {remaining_notional:.2f} > Min {min_notional_per_order}: {'Passed' if pass_min else 'NOT Passed'}", level="info")
-
-        if not pass_min:
-             return False, 0.0, None
-
-        entry_price_offset = self.config['entry_price_offset']
-        if signal == 1: # Long
-            limit_price = current_price - entry_price_offset
-        else: # Short
-            limit_price = current_price + entry_price_offset
-
-        return True, limit_price, signal
+        return valid_entries
 
     def _initiate_entry_sequence(self, initial_limit_price, signal, batch_size):
         # NOTE: This function places the batch. It does NOT handle the loop logic. 
@@ -1663,7 +1693,8 @@ class TradingBotEngine:
             log_str = f"Batch{self.batch_counter}-{i+1}:M:{market_p:.2f}|En:{current_limit_price:.2f}|Tp:{tp_px:.2f}|SL:{sl_px:.2f}|{target_notional}|{side_str}|{mode_str}"
             self.log(log_str, level="info")
             
-            entry_order_response = self._okx_place_order(self.config['symbol'], "Buy" if signal == 1 else "Sell", qty_contracts, price=current_limit_price, order_type="Limit", time_in_force="GoodTillCancel", verbose=False)
+            p_side_entry = "long" if signal == 1 else "short"
+            entry_order_response = self._okx_place_order(self.config['symbol'], "Buy" if signal == 1 else "Sell", qty_contracts, price=current_limit_price, order_type="Limit", time_in_force="GoodTillCancel", posSide=p_side_entry, verbose=False)
 
             if entry_order_response and entry_order_response.get('ordId'):
                 order_id = entry_order_response['ordId']
@@ -1970,6 +2001,7 @@ class TradingBotEngine:
                 # 1. Entry Loop
                 while not self.stop_event.is_set():
                     self.log("-" * 90)
+                    self.log("-" * 90)
                     self.log("Check Entry Condition")
                     market_data = self._get_latest_data_and_indicators()
                     if not market_data:
@@ -1977,21 +2009,20 @@ class TradingBotEngine:
                         time.sleep(5)
                         continue
                         
-                    can_enter, limit_price, signal = self._check_entry_conditions(market_data)
+                    valid_signals = self._check_entry_conditions(market_data)
                     
-                    if can_enter:
-                        # Place Batch
-                        self._initiate_entry_sequence(limit_price, signal, self.config['batch_size_per_loop'])
+                    if valid_signals:
+                        # Process all valid signals (e.g. could be both Long and Short)
+                        for entry_info in valid_signals:
+                             self._initiate_entry_sequence(entry_info['limit_price'], entry_info['signal'], self.config['batch_size_per_loop'])
                         
                         # Wait Loop Time
                         loop_time = self.config.get('loop_time_seconds', 10)
-                        self.log(f"Wait {loop_time} seconds")
+                        self.log(f"Wait {loop_time} seconds (Post-Entry)")
                         time.sleep(loop_time)
-                        # Loop continues to check entry again
                     else:
-                        # "Stop Orders"
-                        self.log("Stop Orders")
-                        break # Break inner loop to go to cancel checks
+                        self.log("Stop Orders (No passing signals in this cycle)")
+                        break
                 
                 # 2. Cancel Check - Now handled by background thread
                 # NO-OP here to prevent blocking main loop
@@ -2237,9 +2268,9 @@ class TradingBotEngine:
         response_positions = self._okx_request("GET", path_positions, params=params_positions)
 
         with self.position_lock:
-            # Preserve current qty for comparison
-            prev_qty = self.position_qty
-            pos_found = False
+            # Preserve current qty for comparison across all sides
+            prev_qtys = {k: v for k, v in self.position_qty.items()}
+            found_sides = set()
 
             if response_positions and response_positions.get('code') == '0':
                 positions_data = response_positions.get('data', [])
@@ -2247,38 +2278,64 @@ class TradingBotEngine:
                 
                 for pos in positions_data:
                     if pos.get('instId') == self.config['symbol'] and safe_float(pos.get('pos')) != 0:
+                        raw_side = pos.get('posSide', 'net')
+                        # Map side to our internal keys
+                        side_key = 'long'
+                        if raw_side == 'short':
+                            side_key = 'short'
+                        elif raw_side == 'net':
+                            # In one-way mode, use the configured direction or default to long
+                            side_key = self.config.get('direction', 'long')
+                            if side_key == 'both': side_key = 'long' # Default both-net to long for display
+
+                        found_sides.add(side_key)
                         new_qty = safe_float(pos.get('pos')) * contract_size
-                        if abs(new_qty - prev_qty) > 0.000001:
-                            # Trigger sync if qty changed OR if TP/SL are missing
-                            self.log(f"Position update detected. Qty: {prev_qty} -> {new_qty}. Syncing TP/SL...", level="debug")
+                        
+                        if abs(new_qty - prev_qtys.get(side_key, 0.0)) > 0.000001:
+                            self.log(f"Position update [{side_key.upper()}]: {prev_qtys.get(side_key, 0.0)} -> {new_qty}. Syncing TP/SL...", level="debug")
                             self._should_update_tpsl = True
-                            
-                            # Increment total trades count on every fill increase
-                            if abs(new_qty) > abs(prev_qty):
+                            if abs(new_qty) > abs(prev_qtys.get(side_key, 0.0)):
                                 self.total_trades_count += 1
                         
-                        if self.current_take_profit == 0 or self.current_stop_loss == 0:
+                        if self.current_take_profit[side_key] == 0 or self.current_stop_loss[side_key] == 0:
                              self._should_update_tpsl = True
 
-                        self.in_position = True
-                        self.position_entry_price = safe_float(pos.get('avgPx'))
-                        self.position_qty = new_qty
-                        pos_found = True
-                        break
+                        self.in_position[side_key] = True
+                        self.position_entry_price[side_key] = safe_float(pos.get('avgPx'))
+                        self.position_qty[side_key] = new_qty
             
-            if not pos_found:
-                self.in_position = False
-                self.position_entry_price = 0.0
-                self.position_qty = 0.0
-                self.current_take_profit = 0.0
-                self.current_stop_loss = 0.0
+            # Reset sides that were not found
+            for s in ['long', 'short']:
+                if s not in found_sides:
+                    self.in_position[s] = False
+                    self.position_entry_price[s] = 0.0
+                    self.position_qty[s] = 0.0
+                    self.current_take_profit[s] = 0.0
+                    self.current_stop_loss[s] = 0.0
             
+            # Emit combined position update (Frontend will still show 'primary' or we can update it later)
+            # For now, pick the first active one or long if both for backward compatibility with UI
+            display_side = 'long' if self.in_position['long'] else ('short' if self.in_position['short'] else 'long')
+
             self.emit('position_update', {
-                'in_position': self.in_position,
-                'position_entry_price': self.position_entry_price,
-                'position_qty': self.position_qty,
-                'current_take_profit': self.current_take_profit,
-                'current_stop_loss': self.current_stop_loss
+                'in_position': self.in_position[display_side],
+                'position_entry_price': self.position_entry_price[display_side],
+                'position_qty': self.position_qty[display_side],
+                'current_take_profit': self.current_take_profit[display_side],
+                'current_stop_loss': self.current_stop_loss[display_side],
+                # New fields for advanced UI if needed
+                'positions': {
+                    'long': {
+                        'in': self.in_position['long'],
+                        'qty': self.position_qty['long'],
+                        'price': self.position_entry_price['long']
+                    },
+                    'short': {
+                        'in': self.in_position['short'],
+                        'qty': self.position_qty['short'],
+                        'price': self.position_entry_price['short']
+                    }
+                }
             })
 
         # Calculate Net Profit
@@ -2335,7 +2392,7 @@ class TradingBotEngine:
                     # We might want to trigger TP/SL update here too.
                     self._should_update_tpsl = True # Flag to update TP/SL if needed
 
-        if getattr(self, '_should_update_tpsl', False) and self.in_position:
+        if getattr(self, '_should_update_tpsl', False) and any(self.in_position.values()):
             self._should_update_tpsl = False
             # Call TP/SL modification to sync with new average price
             threading.Thread(target=self.batch_modify_tpsl, daemon=True).start()
@@ -2351,6 +2408,10 @@ class TradingBotEngine:
                  # Otherwise respect what's in config (or memory)
                  pass
 
+        # Trade Fee Calculation: Used_Notional * Fee_Percentage
+        trade_fee_pct = self.config.get('trade_fee_percentage', 0.07)
+        trade_fees = used_amount_notional * (trade_fee_pct / 100.0)
+
         total_active_trades_count = self.total_trades_count + len(formatted_open_trades)
 
         # Emit data to frontend
@@ -2360,6 +2421,7 @@ class TradingBotEngine:
             'max_allowed_used_display': max_allowed_display, 
             'max_amount_display': max_amount_display,
             'used_amount': used_amount_notional, 
+            'trade_fees': trade_fees,
             'remaining_amount': remaining_amount_notional, 
             'total_balance': total_balance,
             'available_balance': available_balance,
@@ -2432,125 +2494,120 @@ class TradingBotEngine:
             price_precision = PRODUCT_INFO.get('pricePrecision', 4)
             qty_precision = PRODUCT_INFO.get('qtyPrecision', 8)
 
+            current_market_price = self._get_latest_data_and_indicators().get('current_price')
+            if not current_market_price: return
+
+            # Group positions by side for batch processing if needed, but here we loop
             for pos in positions:
                 if pos.get('instId') == self.config['symbol']:
                     pos_qty = safe_float(pos.get('pos', '0'))
-                    pos_side = pos.get('posSide')
+                    pos_side_raw = pos.get('posSide', 'net')
                     avg_px = safe_float(pos.get('avgPx', '0'))
 
                     if abs(pos_qty) > 0 and avg_px > 0:
-                        # Determine actual side if 'net'
-                        if pos_side == 'net' or not pos_side:
-                            actual_side = 'short' if pos_qty < 0 else 'long'
-                        else:
-                            actual_side = pos_side
+                        # Map to our internal side key
+                        side_key = 'long'
+                        if pos_side_raw == 'short':
+                            side_key = 'short'
+                        elif pos_side_raw == 'net':
+                             # Map net to configured direction
+                             side_key = self.config.get('direction', 'long')
+                             if side_key == 'both': side_key = 'long' 
 
-                        # Recalculate TP/SL based on avg_px
-                    # Audit: Using tp_price_offset/sl_price_offset as primary offsets.
-                    # Future: Could integrate tp_amount/sl_amount if configured for fixed $ value.
-                    if actual_side == 'long':
-                        new_tp = avg_px + tp_price_offset
-                        new_sl = avg_px - sl_price_offset
-                        order_side = "sell"
-                    else: # short
-                        new_tp = avg_px - tp_price_offset
-                        new_sl = avg_px + sl_price_offset
-                        order_side = "buy"
-                    
-                    # LOGGING AUDIT: Clear avg_px tracking to debug user discrepancy
-                    self.log(f"Syncing TP/SL for {actual_side} position. Avg Price: {avg_px:.{price_precision}f}", level="info")
+                        if side_key == 'long':
+                            new_tp = avg_px + tp_price_offset
+                            new_sl = avg_px - sl_price_offset
+                            order_side = "sell"
+                        else: # short
+                            new_tp = avg_px - tp_price_offset
+                            new_sl = avg_px + sl_price_offset
+                            order_side = "buy"
 
-                    # SAFE TP LOGIC: Prevent OKX error 51277 (trigger price invalid)
-                    # If market has already MOVE PAST our target, adjust trigger to ensure it flips.
-                    price_tick = 1.0 / (10**price_precision)
-                    if actual_side == 'long':
-                        if current_market_price >= new_tp:
-                            self.log(f"⚠️ Market ({current_market_price}) above TP ({new_tp}). Adjusting to trigger immediately.", level="warning")
-                            new_tp = current_market_price + price_tick
-                    else: # short
-                        # REVERSED: Based on user log image "Reverse"
-                        if current_market_price >= new_tp:
-                            self.log(f"⚠️ Market ({current_market_price}) above TP ({new_tp}). Adjusting to trigger immediately.", level="warning")
-                            new_tp = current_market_price + price_tick
+                        # LOGGING AUDIT: Clear avg_px tracking to debug user discrepancy
+                        self.log(f"Syncing TP/SL for {side_key.upper()} position. Avg Price: {avg_px:.{price_precision}f}", level="info")
+
+                        # SAFE TP LOGIC: Prevent OKX error 51277
+                        price_tick = 1.0 / (10**price_precision)
+                        if side_key == 'long':
+                            if current_market_price >= new_tp:
+                                self.log(f"⚠️ Market ({current_market_price}) above TP ({new_tp}). Adjusting.", level="warning")
+                                new_tp = current_market_price + price_tick
+                        else: # short
+                            if current_market_price <= new_tp: # SHORT TP is below market. If market below TP, we passed it.
+                                self.log(f"⚠️ Market ({current_market_price}) below TP ({new_tp}). Adjusting.", level="warning")
+                                new_tp = current_market_price - price_tick
 
                         with self.position_lock:
-                            # 1. Fetch ALL active algo orders for this symbol from OKX to be safe
+                            # 1. Fetch and cancel existing algo orders for this SYMBOL + SIDE
+                            # Note: OKX allows filtering by posSide in some cases, but here we check all and filter locally
                             path_algo = "/api/v5/trade/orders-algo-pending"
-                            params_algo = {
-                                "instType": "SWAP", 
-                                "instId": self.config['symbol'],
-                                "ordType": "conditional" # RESTORED: Required by OKX
-                            }
+                            params_algo = {"instType": "SWAP", "instId": self.config['symbol'], "ordType": "conditional"}
                             resp_algo = self._okx_request("GET", path_algo, params=params_algo)
                             
                             if resp_algo and resp_algo.get('code') == '0':
                                 for algo_order in resp_algo.get('data', []):
-                                    algo_id = algo_order.get('algoId')
-                                    # Cancel if it's a TP/SL/OCO order for this position
-                                    self.log(f"Cancelling existing algo order {algo_id} on OKX", level="debug")
-                                    self._okx_cancel_algo_order(self.config['symbol'], algo_id)
+                                    if algo_order.get('posSide') == pos_side_raw:
+                                        self._okx_cancel_algo_order(self.config['symbol'], algo_order.get('algoId'))
                             
-                            self.position_exit_orders = {}
-                            time.sleep(0.5) 
+                            self.position_exit_orders[side_key] = {}
+                            time.sleep(0.2) 
 
-                            # Place new TP and SL algo orders
-                            # CONFIG AUDIT: Use 'tp_mode' and 'trigger_price' from config
+                            # Place new TP and SL
                             trig_px_type = self.config.get('trigger_price', 'last')
                             
                             tp_body = {
                                 "instId": self.config['symbol'],
                                 "tdMode": self.config.get('mode', 'cross'),
                                 "side": order_side,
-                                "posSide": pos_side,
+                                "posSide": pos_side_raw,
                                 "ordType": "conditional",
                                 "sz": f"{abs(pos_qty):.{qty_precision}f}",
                                 "tpTriggerPx": f"{new_tp:.{price_precision}f}",
                                 "tpTriggerPxType": trig_px_type,
-                                "tpOrdPx": "-1", # market order for TP realization
+                                "tpOrdPx": "-1",
                                 "reduceOnly": "true"
                             }
 
                             tp_order = self._okx_place_algo_order(tp_body, verbose=False)
                             if tp_order and (tp_order.get('algoId') or tp_order.get('ordId')):
-                                self.position_exit_orders['tp'] = tp_order.get('algoId') or tp_order.get('ordId')
-                                self.log(f"🎯 TP Order Set: {new_tp:.{price_precision}f} ({trig_px_type} price)", level="info")
-                            else:
-                                self.log(f"❌ TP Placement Failed!", level="error")
-
+                                self.position_exit_orders[side_key]['tp'] = tp_order.get('algoId') or tp_order.get('ordId')
+                                self.log(f"🎯 {side_key.upper()} TP Set: {new_tp:.{price_precision}f}", level="info")
+                            
                             sl_body = {
                                 "instId": self.config['symbol'],
                                 "tdMode": self.config.get('mode', 'cross'),
                                 "side": order_side,
-                                "posSide": pos_side,
+                                "posSide": pos_side_raw,
                                 "ordType": "conditional",
                                 "sz": f"{abs(pos_qty):.{qty_precision}f}",
                                 "slTriggerPx": f"{new_sl:.{price_precision}f}",
                                 "slTriggerPxType": trig_px_type,
-                                "slOrdPx": "-1", # market order for SL realization
+                                "slOrdPx": "-1",
                                 "reduceOnly": "true"
                             }
 
                             sl_order = self._okx_place_algo_order(sl_body, verbose=False)
                             if sl_order and (sl_order.get('algoId') or sl_order.get('ordId')):
-                                self.position_exit_orders['sl'] = sl_order.get('algoId') or sl_order.get('ordId')
-                                self.log(f"🎯 SL Order Set: {new_sl:.{price_precision}f} ({trig_px_type} price)", level="info")
-                            else:
-                                self.log(f"❌ SL Placement Failed!", level="error")
+                                self.position_exit_orders[side_key]['sl'] = sl_order.get('algoId') or sl_order.get('ordId')
+                                self.log(f"🎯 {side_key.upper()} SL Set: {new_sl:.{price_precision}f}", level="info")
                             
-                            self.current_take_profit = new_tp
-                            self.current_stop_loss = new_sl
+                            self.current_take_profit[side_key] = new_tp
+                            self.current_stop_loss[side_key] = new_sl
                             modified_count += 1
+                            
+                            # Emit side-specific update
                             self.emit('position_update', {
-                                'in_position': self.in_position,
-                                'position_entry_price': self.position_entry_price,
-                                'position_qty': self.position_qty,
-                                'current_take_profit': self.current_take_profit,
-                                'current_stop_loss': self.current_stop_loss
+                                'in_position': self.in_position[side_key],
+                                'position_entry_price': self.position_entry_price[side_key],
+                                'position_qty': self.position_qty[side_key],
+                                'current_take_profit': self.current_take_profit[side_key],
+                                'current_stop_loss': self.current_stop_loss[side_key],
+                                'side': side_key
                             })
 
             if modified_count > 0:
-                self.log(f"Successfully modified TP/SL for {modified_count} positions.", level="info")
-                self.emit('success', {'message': f'Successfully modified TP/SL for {modified_count} positions.'})
+                self.log(f"Successfully modified TP/SL for {modified_count} sides.", level="info")
+                self.emit('success', {'message': f'Successfully modified TP/SL for {modified_count} sides.'})
             else:
                 self.log("No active positions found (or matched criteria) to modify TP/SL.", level="debug")
         

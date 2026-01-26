@@ -43,5 +43,7 @@
   "use_candlestick_conditions": false,
   "log_level": "info",
   "use_pnl_auto_cancel": false,
-  "pnl_auto_cancel_threshold": 100.0
+  "pnl_auto_cancel_threshold": 100.0,
+  "okx_pos_mode": "long_short_mode",
+  "trade_fee_percentage": 0.07
 }
