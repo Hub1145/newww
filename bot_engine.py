@@ -135,9 +135,10 @@ class TradingBotEngine:
         self.trade_data_lock = threading.Lock()
         self.latest_trade_price = None
         self.latest_trade_timestamp = None
+        self.last_price_update_time = time.time() # High-precision timestamp of last price arrival
         self.account_balance = 0.0
         self.available_balance = 0.0
-        self.initial_total_capital = self.config.get('initial_total_capital', 0.0) # Correctly load from config
+        self.initial_total_capital = 0.0 # Session-based, in-memory only
         self.account_info_lock = threading.Lock()
         self.net_profit = 0.0 # Track actual PnL
         self.in_position = False
@@ -556,7 +557,10 @@ class TradingBotEngine:
             return False
 
     def _get_ws_url(self):
-        # Use the public WebSocket endpoint as requested
+        # Dynamic URL: Production vs Demo
+        if self.config.get('use_testnet'):
+            self.log("Using OKX Demo WebSocket (wspap.okx.com)", level="debug")
+            return "wss://wspap.okx.com:8443/ws/v5/public"
         return "wss://ws.okx.com:8443/ws/v5/public"
 
     def _on_websocket_message(self, ws_app, message):
@@ -587,11 +591,13 @@ class TradingBotEngine:
                     with self.trade_data_lock:
                         self.latest_trade_timestamp = int(data[-1].get('ts'))
                         self.latest_trade_price = safe_float(data[-1].get('px'))
+                        self.last_price_update_time = time.time()
 
                 elif channel == 'tickers' and data:
                     # Process ticker data to update latest_trade_price
                     # The `last` field from ticker data represents the current price
                     self.latest_trade_price = safe_float(data[0].get('last'))
+                    self.last_price_update_time = time.time()
                     # No need to update historical data store from tickers channel
 
         except json.JSONDecodeError:
@@ -1406,15 +1412,15 @@ class TradingBotEngine:
                 if current_price is None:
                     self.log(f"Could not get current market price from WebSocket. Waiting for data.", level="warning")
                     return None
-
-            # self.log("=" * 80, level="info")
-            # self.log("MARKET DATA ACQUIRED", level="info")
-            # self.log("=" * 80, level="info")
-            # self.log(f"Current Price: ${current_price:.2f}", level="info")
-            # self.log("=" * 80, level="info")
+                
+                # Check price age for logging/diagnostics
+                price_age = time.time() - self.last_price_update_time
+                if price_age > 1.0:
+                    self.log(f"Price data is {price_age:.1f}s old. Checking connection...", level="debug")
 
             return {
-                'current_price': current_price
+                'current_price': current_price,
+                'price_age': price_age
             }
 
         except Exception as e:
@@ -1489,14 +1495,21 @@ class TradingBotEngine:
         min_notional_per_order = self.config.get('min_order_amount', 100)
         
         with self.position_lock:
-            # We use recorded used_amount_notional which sums up current positions logic
+            # High-Precision Remaining Calculation
             remaining_notional = max_notional_capacity - self.used_amount_notional
             
-            # self.log(f"DEBUG: MaxUSDT={max_amount_usdt}, Lev={leverage}, MaxNotional={max_notional_capacity}, Used={self.used_amount_notional:.2f}, Rem={remaining_notional:.2f}", level="debug")
-
             if remaining_notional < min_notional_per_order:
-                self.log(f"{log_prefix}Entry-3:Remaining: {remaining_notional:.2f} > Min {min_notional_per_order}: NOT Passed", level="info")
+                self.log(f"{log_prefix}Entry-3:Remaining Capacity: {remaining_notional:.2f} < Min {min_notional_per_order}: NOT Passed", level="info")
                 return False, 0.0, None
+
+        target_amount = self.config.get('target_order_amount', 100)
+
+        # 5. REAL WALLET COLLATERAL CHECK
+        # Check if the OKX account actually has enough USDT to open the next trade.
+        required_margin = (target_amount / leverage)
+        if self.available_balance < required_margin:
+            self.log(f"{log_prefix}Wallet-Safety: Available ${self.available_balance:.2f} < Required ${required_margin:.2f}. Insufficient Collateral in OKX Wallet.", level="warning")
+            return False, 0.0, None
 
         current_price = market_data['current_price']
         
@@ -1546,7 +1559,6 @@ class TradingBotEngine:
         if not candlestick_passed:
             return False, 0.0, None
 
-        target_amount = self.config.get('target_order_amount', 100)
         # Check explicit target check for log
         # "Entry-3:Remaining:15000 >Target 1000: Passed"
         pass_target = remaining_notional >= target_amount
@@ -1914,8 +1926,17 @@ class TradingBotEngine:
             try:
                 # 1. High Frequency: Cancellation Check (every ~1s)
                 self._check_cancel_conditions()
+
+                # 2. Connection Health: Stale Price Monitor
+                price_age = now - self.last_price_update_time
+                if price_age > 30 and self.is_running:
+                     self.log(f"WARNING: Market price is STALE ({price_age:.1f}s). Re-initializing WebSocket...", level="warning")
+                     # Reset update time to avoid spamming reconnects
+                     self.last_price_update_time = now 
+                     # Trigger async reconnect
+                     threading.Thread(target=self._initialize_websocket, daemon=True).start()
                 
-                # 2. Lower Frequency: Account Info & Emitting (every ~10s)
+                # 3. Lower Frequency: Account Info & Emitting (every ~10s)
                 if now - last_account_sync >= 10:
                     self._fetch_and_emit_account_info()
                     last_account_sync = now
@@ -2268,8 +2289,10 @@ class TradingBotEngine:
             positions_data = response_positions.get('data', [])
             for pos in positions_data:
                 if pos.get('instId') == self.config['symbol'] and safe_float(pos.get('pos')) != 0:
-                    # Margin * Leverage = Notional
-                    used_amount_notional += safe_float(pos.get('margin', 0)) * leverage
+                    # High-Precision Notional: Size * Price * ContractSize
+                    # 'notionalUsd' is often provided by OKX, but we calculate for maximum accuracy
+                    pos_notional = abs(safe_float(pos.get('pos'))) * safe_float(pos.get('avgPx')) * contract_size
+                    used_amount_notional += pos_notional
                     active_positions_count += 1
 
         with self.trade_data_lock:
@@ -2305,12 +2328,10 @@ class TradingBotEngine:
             # REMOVED: self.initial_total_capital = total_balance reset. 
             # We want to keep the original capital to track net profit correctly.
         else:
-            # If initial_total_capital is 0 (first run or reset), set it to current total balance
+            # Capture starting capital for the session if not set
             if self.initial_total_capital <= 0 and total_balance > 0:
                  self.initial_total_capital = total_balance
-                 self.config['initial_total_capital'] = total_balance
-                 self._save_config()
-                 self.log(f"Initialized Total Capital to ${total_balance:.2f} and saved to config", level="info")
+                 self.log(f"Session Started. Capture Total Capital: ${total_balance:.2f}", level="debug")
             else:
                  # Otherwise respect what's in config (or memory)
                  pass

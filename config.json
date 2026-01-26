@@ -40,11 +40,6 @@
   "min_chg_high_close": 0,
   "max_chg_high_close": 0,
   "candlestick_timeframe": "15m",
-  "websocket_timeframes": [
-    "1m",
-    "5m"
-  ],
   "use_candlestick_conditions": false,
-  "log_level": "info",
-  "initial_total_capital": 7233.211253709815
+  "log_level": "info"
 }
