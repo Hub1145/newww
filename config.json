@@ -41,5 +41,7 @@
   "max_chg_high_close": 0,
   "candlestick_timeframe": "15m",
   "use_candlestick_conditions": false,
-  "log_level": "info"
+  "log_level": "info",
+  "use_pnl_auto_cancel": false,
+  "pnl_auto_cancel_threshold": 100.0
 }

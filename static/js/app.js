@@ -85,6 +85,15 @@ function setupEventListeners() {
     document.getElementById('useCandlestickConditions').addEventListener('change', toggleCandlestickInputs);
     // Call on load to set initial state
     toggleCandlestickInputs();
+
+    // PnL Auto-Cancel listeners
+    document.getElementById('usePnlAutoCancel').addEventListener('change', () => {
+        saveLiveConfigs();
+    });
+    document.getElementById('pnlAutoCancelThreshold').addEventListener('change', () => {
+        saveLiveConfigs();
+    });
+
     document.getElementById('testApiKeyBtn').addEventListener('click', testApiKey);
 }
 
@@ -535,6 +544,14 @@ async function loadConfig() {
     try {
         const response = await fetch('/api/config');
         currentConfig = await response.json();
+
+        // Sync PnL Auto-Cancel UI
+        if (currentConfig.use_pnl_auto_cancel !== undefined) {
+            document.getElementById('usePnlAutoCancel').checked = currentConfig.use_pnl_auto_cancel;
+        }
+        if (currentConfig.pnl_auto_cancel_threshold !== undefined) {
+            document.getElementById('pnlAutoCancelThreshold').value = currentConfig.pnl_auto_cancel_threshold;
+        }
     } catch (error) {
         console.error('Error loading config:', error);
         showNotification('Failed to load configuration', 'error');
@@ -605,7 +622,26 @@ function loadConfigToModal() {
     document.getElementById('minChgHighClose').value = currentConfig.min_chg_high_close;
     document.getElementById('maxChgHighClose').value = currentConfig.max_chg_high_close;
     document.getElementById('candlestickTimeframe').value = currentConfig.candlestick_timeframe;
+
+    // PnL Auto-Cancel (Modal Sync)
+    const autCancelCheck = document.getElementById('usePnlAutoCancelModal');
+    const autCancelThreshold = document.getElementById('pnlAutoCancelThresholdModal');
+    if (autCancelCheck) autCancelCheck.checked = currentConfig.use_pnl_auto_cancel;
+    if (autCancelThreshold) autCancelThreshold.value = currentConfig.pnl_auto_cancel_threshold;
 }
+
+// Helper to keep dashboard and modal in sync
+document.addEventListener('change', (e) => {
+    if (e.target.id === 'usePnlAutoCancel') {
+        document.getElementById('usePnlAutoCancelModal').checked = e.target.checked;
+    } else if (e.target.id === 'usePnlAutoCancelModal') {
+        document.getElementById('usePnlAutoCancel').checked = e.target.checked;
+    } else if (e.target.id === 'pnlAutoCancelThreshold') {
+        document.getElementById('pnlAutoCancelThresholdModal').value = e.target.value;
+    } else if (e.target.id === 'pnlAutoCancelThresholdModal') {
+        document.getElementById('pnlAutoCancelThreshold').value = e.target.value;
+    }
+});
 
 async function saveConfig() {
     const newConfig = {
@@ -655,6 +691,10 @@ async function saveConfig() {
         min_chg_high_close: parseFloat(document.getElementById('minChgHighClose').value),
         max_chg_high_close: parseFloat(document.getElementById('maxChgHighClose').value),
         candlestick_timeframe: document.getElementById('candlestickTimeframe').value,
+
+        // PnL Auto-Cancel
+        use_pnl_auto_cancel: document.getElementById('usePnlAutoCancel').checked,
+        pnl_auto_cancel_threshold: parseFloat(document.getElementById('pnlAutoCancelThreshold').value)
     };
 
     try {
@@ -679,6 +719,40 @@ async function saveConfig() {
     } catch (error) {
         console.error('Error saving config:', error);
         showNotification('Failed to save configuration', 'error');
+    }
+}
+
+// Function to save specific configs without closing modal (live updates)
+async function saveLiveConfigs() {
+    if (!currentConfig) return;
+
+    const liveConfig = {
+        use_pnl_auto_cancel: document.getElementById('usePnlAutoCancel').checked,
+        pnl_auto_cancel_threshold: parseFloat(document.getElementById('pnlAutoCancelThreshold').value)
+    };
+
+    try {
+        const response = await fetch('/api/config', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(liveConfig)
+        });
+        const data = await response.json();
+        if (data.success) {
+            showNotification('Auto-Exit settings saved', 'success');
+            // Update local currentConfig but don't reload everything
+            currentConfig.use_pnl_auto_cancel = liveConfig.use_pnl_auto_cancel;
+            currentConfig.pnl_auto_cancel_threshold = liveConfig.pnl_auto_cancel_threshold;
+        } else {
+            // Revert UI on error (e.g. bot running error)
+            document.getElementById('usePnlAutoCancel').checked = currentConfig.use_pnl_auto_cancel;
+            document.getElementById('pnlAutoCancelThreshold').value = currentConfig.pnl_auto_cancel_threshold;
+            showNotification(data.message, 'error');
+        }
+    } catch (error) {
+        console.error('Error saving live config:', error);
     }
 }
 

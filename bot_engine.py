@@ -1927,7 +1927,22 @@ class TradingBotEngine:
                 # 1. High Frequency: Cancellation Check (every ~1s)
                 self._check_cancel_conditions()
 
-                # 2. Connection Health: Stale Price Monitor
+                # 2. PnL-Based Auto-Exit Check
+                use_auto_cancel = self.config.get('use_pnl_auto_cancel', False)
+                threshold = self.config.get('pnl_auto_cancel_threshold', 100.0)
+                if use_auto_cancel and self.net_profit >= threshold and self.is_running:
+                    self.log(f"PNL TARGET HIT! Profit ${self.net_profit:.2f} >= ${threshold:.2f}. Triggering Auto-Exit Shutdown.", level="critical")
+                    # Stop the bot first to prevent new orders
+                    self.is_running = False
+                    self.stop_event.set()
+                    # Cancel all pending orders and close all positions
+                    self._close_all_entry_orders()
+                    self._check_and_close_any_open_position()
+                    self.emit('bot_status', {'running': False})
+                    self.log("Auto-Exit Shutdown Complete.", level="info")
+                    return # Exit the thread
+                
+                # 3. Connection Health: Stale Price Monitor
                 price_age = now - self.last_price_update_time
                 if price_age > 30 and self.is_running:
                      self.log(f"WARNING: Market price is STALE ({price_age:.1f}s). Re-initializing WebSocket...", level="warning")
