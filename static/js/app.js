@@ -97,6 +97,11 @@ function setupEventListeners() {
         saveLiveConfigs();
     });
 
+    // Refresh Fees Button
+    document.getElementById('refreshFeesBtn').addEventListener('click', () => {
+        loadStatus();
+    });
+
     document.getElementById('testApiKeyBtn').addEventListener('click', testApiKey);
 }
 
@@ -254,11 +259,24 @@ function updateAccountMetrics(data) {
     document.getElementById('maxAllowedUsedDisplay').textContent = `$${data.max_allowed_used_display !== undefined ? data.max_allowed_used_display.toFixed(2) : '0.00'}`;
     document.getElementById('maxAmountDisplay').textContent = `$${data.max_amount_display !== undefined ? data.max_amount_display.toFixed(2) : '0.00'}`;
     document.getElementById('usedAmount').textContent = `$${data.used_amount !== undefined ? data.used_amount.toFixed(2) : '0.00'}`;
-    document.getElementById('tradeFees').textContent = `$${data.trade_fees !== undefined ? data.trade_fees.toFixed(2) : '0.00'}`;
     document.getElementById('remainingAmount').textContent = `$${data.remaining_amount !== undefined ? data.remaining_amount.toFixed(2) : '0.00'}`;
     document.getElementById('balance').textContent = `$${data.total_balance !== undefined ? data.total_balance.toFixed(2) : '0.00'}`;
     document.getElementById('netProfit').textContent = `$${data.net_profit !== undefined ? data.net_profit.toFixed(2) : '0.00'}`;
     document.getElementById('totalTrades').textContent = data.total_trades !== undefined ? data.total_trades : '0';
+
+    // Calculate fee breakdown based on user's formula
+    const feeRate = currentConfig?.trade_fee_percentage || 0.07;
+    const usedAmount = data.used_amount || 0;
+    const remainingAmount = data.remaining_amount || 0;
+
+    const usedFee = (usedAmount * feeRate) / 100;
+    const remainingFee = (remainingAmount * feeRate) / 100;
+    const totalFee = usedFee + remainingFee;
+
+    document.getElementById('tradeFees').textContent = `$${totalFee.toFixed(2)}`;
+    document.getElementById('usedFee').textContent = `$${usedFee.toFixed(2)}`;
+    document.getElementById('remainingFee').textContent = `$${remainingFee.toFixed(2)}`;
+    document.getElementById('feeRateDisplay').textContent = `${feeRate.toFixed(3)}%`;
 }
 
 function updatePositionDisplay(positionData) {

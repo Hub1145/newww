@@ -72,16 +72,35 @@
 
                 <div class="card mb-3 border-info">
                     <div class="card-body py-2">
-                        <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
-                            <div class="d-flex align-items-center gap-2">
-                                <div class="stat-label text-info small text-uppercase fw-bold"><i
-                                        class="bi bi-percent"></i> Trade Fees</div>
-                                <div class="stat-value text-info fw-bold ms-2" id="tradeFees">$0.00</div>
+                        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                            <div class="d-flex flex-column gap-1" style="flex: 1;">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="text-info small fw-bold">Trade Fee:</span>
+                                    <span class="text-info fw-bold" id="tradeFees">$0.00</span>
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="text-muted small">Used:</span>
+                                    <span class="text-muted small" id="usedFee">$0.00</span>
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="text-muted small">Remaining:</span>
+                                    <span class="text-muted small" id="remainingFee">$0.00</span>
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="text-muted small">Rate:</span>
+                                    <span class="text-muted small" id="feeRateDisplay">0.07%</span>
+                                </div>
                             </div>
-                            <div class="d-flex align-items-center gap-2">
-                                <span class="text-secondary small text-uppercase fw-bold">Trade Fee (%)</span>
-                                <input type="number" class="form-control form-control-sm" id="tradeFeePercentage"
-                                    style="width: 80px;" step="0.001">
+                            <div class="d-flex flex-column align-items-end gap-2">
+                                <div class="d-flex align-items-center gap-1">
+                                    <span class="text-secondary small text-uppercase fw-bold"
+                                        style="font-size: 0.7rem;">Fee %</span>
+                                    <input type="number" class="form-control form-control-sm" id="tradeFeePercentage"
+                                        style="width: 60px; font-size: 0.75rem;" step="0.001">
+                                </div>
+                                <button class="btn btn-sm btn-outline-info" id="refreshFeesBtn" title="Refresh Fees">
+                                    <i class="bi bi-arrow-clockwise"></i>
+                                </button>
                             </div>
                         </div>
                     </div>

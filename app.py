@@ -133,27 +133,57 @@ def test_api_key_route():
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
+    global bot_engine
     if not bot_engine:
-        return jsonify({
-            'running': False,
-            'balance': 0.0,
-            'open_trades': [],
-            'in_position': False,
-            'position_entry_price': 0.0,
-            'position_qty': 0.0,
-            'current_take_profit': 0.0,
-            'current_stop_loss': 0.0
-        })
+        try:
+            bot_engine = TradingBotEngine(config_file, emit_to_client)
+        except Exception as e:
+            logging.error(f"Error initializing bot engine for status: {e}")
+            return jsonify({'running': False, 'error': str(e)}), 500
+
+    # Trigger a sync if not running to get fresh data for dashboard
+    if not bot_engine.is_running:
+        try:
+            bot_engine.fetch_account_data_sync()
+        except Exception as e:
+            logging.error(f"Error fetching sync account data: {e}")
+
+    # Calculate trades and fees for emission
+    total_active_trades_count = bot_engine.total_trades_count + len(bot_engine.open_trades)
+    trade_fee_pct = bot_engine.config.get('trade_fee_percentage', 0.07)
+    trade_fees = bot_engine.used_amount_notional * (trade_fee_pct / 100.0)
 
     return jsonify({
         'running': bot_engine.is_running,
-        'balance': bot_engine.account_balance, # Use actual account balance
+        'total_balance': bot_engine.account_balance,
         'open_trades': bot_engine.open_trades,
+        'net_profit': bot_engine.net_profit,
+        'total_trades': total_active_trades_count,
+        'trade_fees': bot_engine.trade_fees,
+        'total_capital': bot_engine.initial_total_capital,
+        'used_amount': bot_engine.used_amount_notional,
+        'remaining_amount': bot_engine.remaining_amount_notional,
+        'max_allowed_used_display': bot_engine.max_allowed_display,
+        'max_amount_display': bot_engine.max_amount_display,
         'in_position': bot_engine.in_position,
         'position_entry_price': bot_engine.position_entry_price,
         'position_qty': bot_engine.position_qty,
         'current_take_profit': bot_engine.current_take_profit,
-        'current_stop_loss': bot_engine.current_stop_loss
+        'current_stop_loss': bot_engine.current_stop_loss,
+        # Standardize for the frontend if it expects dual positions
+        'positions': {
+            'long': {
+                'in': bot_engine.in_position.get('long', False),
+                'qty': bot_engine.position_qty.get('long', 0.0),
+                'price': bot_engine.position_entry_price.get('long', 0.0)
+            },
+            'short': {
+                'in': bot_engine.in_position.get('short', False),
+                'qty': bot_engine.position_qty.get('short', 0.0),
+                'price': bot_engine.position_entry_price.get('short', 0.0)
+            }
+        },
+        'primary_in_position': any(bot_engine.in_position.values())
     })
  
 @socketio.on('connect')
@@ -288,4 +318,4 @@ def handle_emergency_sl(data=None):
 
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, log_output=True)

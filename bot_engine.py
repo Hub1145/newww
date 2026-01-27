@@ -141,6 +141,12 @@ class TradingBotEngine:
         self.initial_total_capital = 0.0 # Session-based, in-memory only
         self.account_info_lock = threading.Lock()
         self.net_profit = 0.0 # Track actual PnL
+    
+        # Financial Display Metrics
+        self.max_allowed_display = 0.0
+        self.max_amount_display = 0.0
+        self.remaining_amount_notional = 0.0
+        self.trade_fees = 0.0
         
         # Refactored for Dual-Direction Support
         self.in_position = {'long': False, 'short': False}
@@ -1452,7 +1458,8 @@ class TradingBotEngine:
             with self.trade_data_lock: # Use trade_data_lock for latest_trade_price
                 current_price = self.latest_trade_price
                 if current_price is None:
-                    self.log(f"Could not get current market price from WebSocket. Waiting for data.", level="warning")
+                    if self.is_running:
+                        self.log(f"Could not get current market price from WebSocket. Waiting for data.", level="warning")
                     return None
                 
                 # Check price age for logging/diagnostics
@@ -1546,12 +1553,8 @@ class TradingBotEngine:
 
         target_amount = self.config.get('target_order_amount', 100)
 
-        # 5. REAL WALLET COLLATERAL CHECK
-        required_margin = (target_amount / leverage)
-        if self.available_balance < required_margin:
-            self.log(f"{log_prefix}Wallet-Safety: Available ${self.available_balance:.2f} < Required ${required_margin:.2f}. Insufficient Collateral.", level="warning")
-            return []
-
+        # User is responsible for setting Max Allowed within their balance limits
+        # Bot focuses only on remaining capacity
         current_price = market_data['current_price']
         direction_mode = self.config.get('direction', 'long')
         long_safety = self.config.get('long_safety_line_price', 0)
@@ -2173,6 +2176,12 @@ class TradingBotEngine:
             finally:
                 time.sleep(self.config.get('account_update_interval_seconds', 10))
 
+    def fetch_account_data_sync(self):
+        """Fetches account data synchronously. Used for dashboard updates before bot start."""
+        if not PRODUCT_INFO.get('contractSize'):
+            self._fetch_product_info(self.config['symbol'])
+        self._fetch_and_emit_account_info()
+
     def _fetch_and_emit_account_info(self):
         # Fetch account balance
         path_balance = "/api/v5/account/balance"
@@ -2341,6 +2350,14 @@ class TradingBotEngine:
         # Calculate Net Profit
         self._calculate_net_profit_from_fills()
 
+        # Auto-Exit on Profit Check
+        if self.config.get('use_pnl_auto_cancel', False) and self.is_running:
+            pnl_threshold = self.config.get('pnl_auto_cancel_threshold', 100.0)
+            if self.net_profit >= pnl_threshold:
+                self.log(f"🎯 AUTO-EXIT TRIGGERED: Net Profit ${self.net_profit:.2f} >= Target ${pnl_threshold:.2f}", level="warning")
+                # Close all positions and cancel all orders
+                threading.Thread(target=self._execute_trade_exit, args=("Auto-Exit on Profit Target Reached",), daemon=True).start()
+
         # Metrics Calculation (Refined for User)
         # Max labels display Margins as per config (Unleveraged)
         max_allowed_margin = self.config['max_allowed_used']
@@ -2392,7 +2409,7 @@ class TradingBotEngine:
                     # We might want to trigger TP/SL update here too.
                     self._should_update_tpsl = True # Flag to update TP/SL if needed
 
-        if getattr(self, '_should_update_tpsl', False) and any(self.in_position.values()):
+        if getattr(self, '_should_update_tpsl', False) and any(self.in_position.values()) and self.is_running:
             self._should_update_tpsl = False
             # Call TP/SL modification to sync with new average price
             threading.Thread(target=self.batch_modify_tpsl, daemon=True).start()
@@ -2408,9 +2425,17 @@ class TradingBotEngine:
                  # Otherwise respect what's in config (or memory)
                  pass
 
-        # Trade Fee Calculation: Used_Notional * Fee_Percentage
+        # Trade Fee Calculation: (Used + Remaining) * Fee_Percentage
         trade_fee_pct = self.config.get('trade_fee_percentage', 0.07)
-        trade_fees = used_amount_notional * (trade_fee_pct / 100.0)
+        used_fee = used_amount_notional * (trade_fee_pct / 100.0)
+        remaining_fee = remaining_amount_notional * (trade_fee_pct / 100.0)
+        trade_fees = used_fee + remaining_fee
+
+        # Update persistent attributes for status retrieval
+        self.max_allowed_display = max_allowed_display
+        self.max_amount_display = max_amount_display
+        self.remaining_amount_notional = remaining_amount_notional
+        self.trade_fees = trade_fees
 
         total_active_trades_count = self.total_trades_count + len(formatted_open_trades)
 
@@ -2473,9 +2498,14 @@ class TradingBotEngine:
     def batch_modify_tpsl(self):
         self.log("Initiating batch TP/SL modification...", level="debug")
         try:
-            current_market_price = self._get_latest_data_and_indicators()['current_price'] # Use WebSocket price
-            if current_market_price is None:
+            latest_data = self._get_latest_data_and_indicators()
+            if not latest_data:
                 self.log("Could not get current market price for batch TP/SL modification.", level="debug")
+                return
+                
+            current_market_price = latest_data.get('current_price')
+            if current_market_price is None:
+                self.log("Current market price is None for batch TP/SL modification.", level="debug")
                 return
 
             path = "/api/v5/account/positions"
@@ -2493,9 +2523,6 @@ class TradingBotEngine:
             sl_price_offset = self.config['sl_price_offset']
             price_precision = PRODUCT_INFO.get('pricePrecision', 4)
             qty_precision = PRODUCT_INFO.get('qtyPrecision', 8)
-
-            current_market_price = self._get_latest_data_and_indicators().get('current_price')
-            if not current_market_price: return
 
             # Group positions by side for batch processing if needed, but here we loop
             for pos in positions:
