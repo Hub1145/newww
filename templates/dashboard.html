@@ -276,38 +276,85 @@
                             <div id="generalSettings" class="accordion-collapse collapse show"
                                 data-bs-parent="#configAccordion">
                                 <div class="accordion-body">
-                                    <div class="mb-3">
-                                        <label class="form-label">OKX Live API Key</label>
-                                        <input type="text" class="form-control" id="okxApiKey">
+                                    <h6 class="fw-bold mb-3 text-primary">User Credentials (Primary)</h6>
+                                    <div class="ms-3 mb-4">
+                                        <h6 class="small fw-bold">User Live API (Real Money)</h6>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Key</label>
+                                            <input type="text" class="form-control form-control-sm" id="okxApiKey">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Secret</label>
+                                            <input type="password" class="form-control form-control-sm" id="okxApiSecret">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Passphrase</label>
+                                            <input type="password" class="form-control form-control-sm" id="okxPassphrase">
+                                        </div>
                                     </div>
-                                    <div class="mb-3">
-                                        <label class="form-label">OKX Live API Secret</label>
-                                        <input type="password" class="form-control" id="okxApiSecret">
+
+                                    <div class="ms-3 mb-4">
+                                        <h6 class="small fw-bold">User Demo API (Testnet)</h6>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Key</label>
+                                            <input type="text" class="form-control form-control-sm" id="okxDemoApiKey">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Secret</label>
+                                            <input type="password" class="form-control form-control-sm" id="okxDemoApiSecret">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Passphrase</label>
+                                            <input type="password" class="form-control form-control-sm" id="okxDemoApiPassphrase">
+                                        </div>
                                     </div>
-                                    <div class="mb-3">
-                                        <label class="form-label">OKX Live Passphrase</label>
-                                        <input type="password" class="form-control" id="okxPassphrase">
+
+                                    <h6 class="fw-bold mb-3 text-info">Developer Credentials (Testing)</h6>
+                                    <div class="ms-3 mb-4">
+                                        <h6 class="small fw-bold">Developer Live API (Real Money)</h6>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Key</label>
+                                            <input type="text" class="form-control form-control-sm" id="devApiKey">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Secret</label>
+                                            <input type="password" class="form-control form-control-sm" id="devApiSecret">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Passphrase</label>
+                                            <input type="password" class="form-control form-control-sm" id="devPassphrase">
+                                        </div>
                                     </div>
-                                    <button type="button" class="btn btn-info btn-sm mb-3" id="testApiKeyBtn">
-                                        <i class="bi bi-key-fill"></i> Test API Key
-                                    </button>
+
+                                    <div class="ms-3 mb-4">
+                                        <h6 class="small fw-bold">Developer Demo API (Testnet)</h6>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Key</label>
+                                            <input type="text" class="form-control form-control-sm" id="devDemoApiKey">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Secret</label>
+                                            <input type="password" class="form-control form-control-sm" id="devDemoApiSecret">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small mb-1">Passphrase</label>
+                                            <input type="password" class="form-control form-control-sm" id="devDemoApiPassphrase">
+                                        </div>
+                                    </div>
+
                                     <hr>
-                                    <div class="mb-3">
-                                        <label class="form-label">OKX Demo API Key</label>
-                                        <input type="text" class="form-control" id="okxDemoApiKey">
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label">OKX Demo API Secret</label>
-                                        <input type="password" class="form-control" id="okxDemoApiSecret">
-                                    </div>
-                                    <div class="mb-3">
-                                        <label class="form-label">OKX Demo API Passphrase</label>
-                                        <input type="password" class="form-control" id="okxDemoApiPassphrase">
-                                    </div>
                                     <div class="mb-3 form-check">
                                         <input type="checkbox" class="form-check-input" id="useTestnet">
-                                        <label class="form-check-label" for="useTestnet">Use Demo API</label>
+                                        <label class="form-check-label fw-bold" for="useTestnet">Use Demo Trading (Testnet)</label>
                                     </div>
+                                    <div class="mb-3 form-check">
+                                        <input type="checkbox" class="form-check-input" id="useDeveloperApi">
+                                        <label class="form-check-label fw-bold" for="useDeveloperApi">Testing Mode (Use Developer API)</label>
+                                    </div>
+                                    <button type="button" class="btn btn-info btn-sm mb-3" id="testApiKeyBtn">
+                                        <i class="bi bi-key-fill"></i> Test Active API Credentials
+                                    </button>
+                                    <hr>
                                     <div class="mb-3">
                                         <label class="form-label">Symbol</label>
                                         <input type="text" class="form-control" id="symbol">

@@ -108,15 +108,31 @@ class TradingBotEngine:
 
         # Initialize OKX API credentials globally
         global okx_api_key, okx_api_secret, okx_passphrase, okx_simulated_trading_header
-        if self.config['use_testnet']:
-            okx_api_key = self.config['okx_demo_api_key']
-            okx_api_secret = self.config['okx_demo_api_secret']
-            okx_passphrase = self.config['okx_demo_api_passphrase']
+        use_dev = self.config.get('use_developer_api', False)
+        use_demo = self.config.get('use_testnet', False)
+
+        if use_dev:
+            if use_demo:
+                okx_api_key = self.config.get('dev_demo_api_key', '')
+                okx_api_secret = self.config.get('dev_demo_api_secret', '')
+                okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('dev_api_key', '')
+                okx_api_secret = self.config.get('dev_api_secret', '')
+                okx_passphrase = self.config.get('dev_passphrase', '')
+        else:
+            if use_demo:
+                okx_api_key = self.config.get('okx_demo_api_key', '')
+                okx_api_secret = self.config.get('okx_demo_api_secret', '')
+                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('okx_api_key', '')
+                okx_api_secret = self.config.get('okx_api_secret', '')
+                okx_passphrase = self.config.get('okx_passphrase', '')
+
+        if use_demo:
             okx_simulated_trading_header = {'x-simulated-trading': '1'}
         else:
-            okx_api_key = self.config['okx_api_key']
-            okx_api_secret = self.config['okx_api_secret']
-            okx_passphrase = self.config['okx_passphrase']
             okx_simulated_trading_header = {}
 
         self.ws = None
@@ -226,24 +242,29 @@ class TradingBotEngine:
         elif level == 'critical':
             logging.critical(message)
     
-    def start(self):
-        if self.is_running:
-            self.log('Bot is already running', 'warning')
+    def start(self, passive_monitoring=False):
+        if self.is_running and not passive_monitoring:
+            self.log('Bot is already trading', 'warning')
             return
         
-        self.is_running = True
-        self.log('Bot starting...', 'info')
+        if not passive_monitoring:
+            self.is_running = True
+            self.log('Bot starting trading logic...', 'info')
+        else:
+            self.log('Bot starting background monitoring...', 'info')
         
         # New initialization sequence for OKX
         if not get_okx_server_time_and_offset(self.log):
             self.log("Failed to synchronize server time. Please check network connection or API.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
         
         if not self._fetch_product_info(self.config['symbol']):
             self.log("Failed to fetch product info. Exiting.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
  
@@ -251,7 +272,8 @@ class TradingBotEngine:
         target_pos_mode = self.config.get('okx_pos_mode', 'net_mode')
         if not self._okx_set_position_mode(target_pos_mode):
              self.log("Failed to verify/set position mode. Exiting.", 'error')
-             self.is_running = False
+             if not passive_monitoring:
+                self.is_running = False
              self.emit('bot_status', {'running': False})
              return
 
@@ -271,35 +293,53 @@ class TradingBotEngine:
 
         if not lev_success:
             self.log("Failed to set leverage. Exiting.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
         
-        self.log("Checking for and closing any existing open positions...", level="info")
-        self._check_and_close_any_open_position()
+        # Only auto-close positions if we are starting TRADING (not just monitoring)
+        if not passive_monitoring:
+            self.log("Checking for and closing any existing open positions...", level="info")
+            self._check_and_close_any_open_position()
 
-        self.log('Bot initialized. Starting live trading connection...', 'info')
+        # Check if threads are already running
+        if getattr(self, 'ws_thread', None) and self.ws_thread.is_alive():
+            self.log("WebSocket and Management threads are already active.", level="debug")
+            return
+
+        self.log('Bot initialized. Starting live connection threads...', 'info')
         self.stop_event.clear()
         self.ws_thread = threading.Thread(target=self._initialize_websocket_and_start_main_loop, daemon=True)
         self.ws_thread.start()
 
         # Start unified management thread (Account Info + Cancellation)
-        self.mgmt_thread = threading.Thread(target=self._unified_management_loop, daemon=True)
-        self.mgmt_thread.start()
+        # Note: In the previous code, this was started in start(), but it should be part of the thread group
+        if not getattr(self, 'mgmt_thread', None) or not self.mgmt_thread.is_alive():
+            self.mgmt_thread = threading.Thread(target=self._unified_management_loop, daemon=True)
+            self.mgmt_thread.start()
     
     def stop(self):
         if not self.is_running:
-            self.log('Bot is not running', 'warning')
+            self.log('Bot trading is not active', 'warning')
             return
         
         self.is_running = False
-        self.log('Bot stopping...', 'info')
+        self.log('Bot trading logic paused. Background monitoring remains active.', 'info')
         
-        self.stop_event.set() # Signal all threads to stop
-        if self.ws:
-            self.ws.close()
-        
+        # We no longer set stop_event or close WS here to allow background Auto-Exit to work
         self.emit('bot_status', {'running': False})
+
+    def shutdown(self):
+        """Truly stops all threads and connections."""
+        self.is_running = False
+        self.stop_event.set()
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+        self.log('Bot fully shut down.', 'info')
     
     def _load_config(self):
         try:
@@ -1840,100 +1880,44 @@ class TradingBotEngine:
                              del self.pending_entry_order_details[order_id]
                 continue
 
-            # 2. TP Check
-            # We need to calculate pending TP
+            # 2. TP Check (Missed Opportunity)
             tp_offset = self.config.get('tp_price_offset', 0)
-            if signal == 1: # Long
-                 pending_tp = limit_price + tp_offset
-                 # "TP < Market" for Long? (Entry+Offset < Market). Price rose above TP.
-                 # User Log says "TP<Market".
-                 # If this condition is "TP < Market".
-                 cond_tp = pending_tp < current_market_price
-            else: # Short
-                 pending_tp = limit_price - tp_offset
-                 # User Log says "TP<Market". (Entry-Offset < Market).
-                 # This is normally TRUE for Short.
-                 # If user meant "Market < TP" (Price dropped below TP)?
-                 # Let's map "TP < Market" text to "Unfavorable Direction"?
-                 # Actually, for Short, "TP < Market" is the normal 'holding' state.
-                 # "Market below TP" is the 'done' state.
-                 # If user wants cancel on "TP < Market" for Short, it would cancel immediately.
-                 # I suspect user logic is inverted or I am misinterpreting "TP<Market" as the LABEL vs the LOGIC.
-                 # Let's assume the condition is "Price went past TP".
-                 # Short: Market < TP.
-                 # Long: Market > TP.
-                 
-                 # But sticking to the specific string requested "Cancel-2:TP<Market".
-                 # I will log exactly that.
-                 cond_tp = pending_tp < current_market_price
-
-            msg_tp = "Yes" if cond_tp else "None"
-            # However, for Short, cond_tp is almost always Yes.
-            # If I cancel on "Yes", it breaks.
-            # I will disable the ACTUAL cancel for now if it seems wrong, or assume "None" means "False".
-            # User said: "Cancel-2:TP<Market: None".
-            # For Short (Entry 2982, TP 2976, Market 2980).
-            # TP(2976) < Market(2980). Result is TRUE.
-            # But log says "None".
-            # So "TP < Market" condition must be FALSE?
-            # 2976 < 2980 is True.
-            # So the condition for "None" must be "TP >= Market"?
-            # Or maybe the label is "Cancel if TP < Market" and the value is "None" (False).
-            # But 2976 IS < 2980.
-            # This implies the Cancel Trigger is NOT "TP < Market".
-            # It might be "Market < TP"? (For Short).
-            # If Market (2980) < TP (2976)? False. -> None.
-            # OK, so for Short, the condition being checked is likely "Market < TP".
-            # And the label "Cancel-2:TP<Market" is just a label?
-            # Or maybe "TP < Market" is the condition for LONG?
-            # Let's use standard logic: "Target Passed".
-            # For Short: Market < TP.
-            # For Long: Market > TP.
-            
             is_target_passed = False
-            # REVERSED: Based on user feedback "Reverse" and "Not market below tp, But tp below market"
-            if signal == 1: # Long
-                 # Cancel if TP is BELOW market (We passed it)
-                 if current_market_price > pending_tp: is_target_passed = True
-            else: # Short
-                 # Cancel if TP is ABOVE market (We passed it on the way down)
-                 if current_market_price < pending_tp: is_target_passed = True
+            pending_tp = 0.0
             
-            # Logs removed to reduce volume, consolidated below at debug level
-            
-            # 3. Entry Check (Internal state calculation)
-            cond_entry = False
             if signal == 1: # Long
-                 if limit_price < current_market_price: cond_entry = True
+                pending_tp = limit_price + tp_offset
+                if current_market_price > pending_tp:
+                    is_target_passed = True
             else: # Short
-                 if limit_price > current_market_price: cond_entry = True
+                pending_tp = limit_price - tp_offset
+                if current_market_price < pending_tp:
+                    is_target_passed = True
 
-            # REFINED LOGIC: Always respect the FULL seconds timer if price hasn't hit TP/Entry rules.
-            # LOGGING AUDIT: Consolidate logs to reduce noise
-            log_state = f"C1:{'Y' if time_passed else 'N'}|C2:{'Y' if is_target_passed else 'N'}|C3:{'Y' if cond_entry else 'N'}"
-            self.log(f"Order {order_id} Monitor: {log_state}", level="debug")
+            # 3. Entry Check (Taker Avoidance / Directional Move)
+            is_entry_unfavorable = False
+            if signal == 1: # Long
+                if current_market_price < limit_price:
+                    is_entry_unfavorable = True
+            else: # Short
+                if current_market_price > limit_price:
+                    is_entry_unfavorable = True
 
             # Execute Cancellation based on priority
             should_cancel = False
             cancel_msg = ""
             
-            # STRICT TIMER ENFORCEMENT: Time-limit is the absolute rule
             if time_passed:
                 should_cancel = True
                 cancel_msg = f"Time Limit ({cancel_unfilled_seconds}s) reached"
             
-            # Sub-flag: Should we also cancel on price? 
-            # (Keeping price rules active but secondary to the log)
             elif is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
-                # should_cancel = True # Re-evaluate if we want to wait NO MATTER WHAT
-                # cancel_msg = "TP Rule Triggered"
-                pass # DECISION: Following user "it still closes before countdown finishes"
-                     # I will temporarily bypass price-based cancellations for pending orders
-                     # so they stay for the FULL countdown.
-            elif cond_entry and self.config.get('cancel_on_entry_price_below_market'):
-                # should_cancel = True
-                # cancel_msg = "Entry Rule Triggered"
-                pass 
+                should_cancel = True
+                cancel_msg = f"TP Price Unfavorable (Market {current_market_price:.2f} passed TP {pending_tp:.2f})"
+
+            elif is_entry_unfavorable and self.config.get('cancel_on_entry_price_below_market'):
+                should_cancel = True
+                cancel_msg = f"Entry Price Unfavorable (Market {current_market_price:.2f} passed Entry {limit_price:.2f})"
 
             if should_cancel:
                 self.log(f"Cancel Order {order_id} ({cancel_msg})")
@@ -1959,26 +1943,28 @@ class TradingBotEngine:
             now = time.time()
             try:
                 # 1. High Frequency: Cancellation Check (every ~1s)
+                # Note: Only cancel if trading is active or we still have tracked pending orders
                 self._check_cancel_conditions()
 
-                # 2. PnL-Based Auto-Exit Check
+                # 2. PnL-Based Auto-Exit Check (Now works even in Stop mode)
                 use_auto_cancel = self.config.get('use_pnl_auto_cancel', False)
                 threshold = self.config.get('pnl_auto_cancel_threshold', 100.0)
-                if use_auto_cancel and self.net_profit >= threshold and self.is_running:
-                    self.log(f"PNL TARGET HIT! Profit ${self.net_profit:.2f} >= ${threshold:.2f}. Triggering Auto-Exit Shutdown.", level="critical")
-                    # Stop the bot first to prevent new orders
+                if use_auto_cancel and self.net_profit >= threshold:
+                    self.log(f"PNL TARGET HIT! Profit ${self.net_profit:.2f} >= ${threshold:.2f}. Triggering Auto-Exit Liquidate.", level="critical")
+
+                    # Stop trading logic if active
                     self.is_running = False
-                    self.stop_event.set()
+
                     # Cancel all pending orders and close all positions
                     self._close_all_entry_orders()
                     self._check_and_close_any_open_position()
                     self.emit('bot_status', {'running': False})
-                    self.log("Auto-Exit Shutdown Complete.", level="info")
-                    return # Exit the thread
+                    self.log("Auto-Exit Liquidate Complete.", level="info")
+                    # We don't exit the thread, as we want to continue monitoring
                 
                 # 3. Connection Health: Stale Price Monitor
                 price_age = now - self.last_price_update_time
-                if price_age > 30 and self.is_running:
+                if price_age > 30:
                      self.log(f"WARNING: Market price is STALE ({price_age:.1f}s). Re-initializing WebSocket...", level="warning")
                      # Reset update time to avoid spamming reconnects
                      self.last_price_update_time = now 
@@ -2001,8 +1987,12 @@ class TradingBotEngine:
             self.log("Trading loop started.", level="debug")
 
             while not self.stop_event.is_set():
+                if not self.is_running:
+                    time.sleep(1)
+                    continue
+
                 # 1. Entry Loop
-                while not self.stop_event.is_set():
+                while self.is_running and not self.stop_event.is_set():
                     self.log("-" * 90)
                     self.log("-" * 90)
                     self.log("Check Entry Condition")
@@ -2140,10 +2130,15 @@ class TradingBotEngine:
             
             if response and response.get('code') == '0':
                 fills = response.get('data', [])
+
+                # Calculate time window (e.g. last 24 hours) to include manual orders and past session profit
+                now_ms = int(time.time() * 1000)
+                time_window_ms = 24 * 60 * 60 * 1000 # 24 Hours
+                start_time_limit = now_ms - time_window_ms
+
                 for fill in fills:
-                     # Filter for session only
                      fill_ts = int(fill.get('ts', 0))
-                     if fill_ts < self.bot_start_time:
+                     if fill_ts < start_time_limit:
                          continue
 
                      # 'pnl' field contains realized profit for closing trades
@@ -2465,15 +2460,31 @@ class TradingBotEngine:
 
         try:
             # Set global API settings for testing based on self.config (which was modified by app.py)
-            if self.config.get('use_testnet'):
-                okx_api_key = self.config.get('okx_demo_api_key', '')
-                okx_api_secret = self.config.get('okx_demo_api_secret', '')
-                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+            use_dev = self.config.get('use_developer_api', False)
+            use_demo = self.config.get('use_testnet', False)
+
+            if use_dev:
+                if use_demo:
+                    okx_api_key = self.config.get('dev_demo_api_key', '')
+                    okx_api_secret = self.config.get('dev_demo_api_secret', '')
+                    okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
+                else:
+                    okx_api_key = self.config.get('dev_api_key', '')
+                    okx_api_secret = self.config.get('dev_api_secret', '')
+                    okx_passphrase = self.config.get('dev_passphrase', '')
+            else:
+                if use_demo:
+                    okx_api_key = self.config.get('okx_demo_api_key', '')
+                    okx_api_secret = self.config.get('okx_demo_api_secret', '')
+                    okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+                else:
+                    okx_api_key = self.config.get('okx_api_key', '')
+                    okx_api_secret = self.config.get('okx_api_secret', '')
+                    okx_passphrase = self.config.get('okx_passphrase', '')
+
+            if use_demo:
                 okx_simulated_trading_header = {'x-simulated-trading': '1'}
             else:
-                okx_api_key = self.config.get('okx_api_key', '')
-                okx_api_secret = self.config.get('okx_api_secret', '')
-                okx_passphrase = self.config.get('okx_passphrase', '')
                 okx_simulated_trading_header = {}
 
             # Attempt a simple API call, e.g., get account balance
