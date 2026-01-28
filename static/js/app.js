@@ -140,16 +140,29 @@ async function testApiKey() {
     testBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Testing...'; // Show loading spinner
 
     const useTestnet = document.getElementById('useTestnet').checked;
+    const useDev = document.getElementById('useDeveloperApi').checked;
     let apiKey, apiSecret, passphrase;
 
-    if (useTestnet) {
-        apiKey = document.getElementById('okxDemoApiKey').value;
-        apiSecret = document.getElementById('okxDemoApiSecret').value;
-        passphrase = document.getElementById('okxDemoApiPassphrase').value;
+    if (useDev) {
+        if (useTestnet) {
+            apiKey = document.getElementById('devDemoApiKey').value;
+            apiSecret = document.getElementById('devDemoApiSecret').value;
+            passphrase = document.getElementById('devDemoApiPassphrase').value;
+        } else {
+            apiKey = document.getElementById('devApiKey').value;
+            apiSecret = document.getElementById('devApiSecret').value;
+            passphrase = document.getElementById('devPassphrase').value;
+        }
     } else {
-        apiKey = document.getElementById('okxApiKey').value;
-        apiSecret = document.getElementById('okxApiSecret').value;
-        passphrase = document.getElementById('okxPassphrase').value;
+        if (useTestnet) {
+            apiKey = document.getElementById('okxDemoApiKey').value;
+            apiSecret = document.getElementById('okxDemoApiSecret').value;
+            passphrase = document.getElementById('okxDemoApiPassphrase').value;
+        } else {
+            apiKey = document.getElementById('okxApiKey').value;
+            apiSecret = document.getElementById('okxApiSecret').value;
+            passphrase = document.getElementById('okxPassphrase').value;
+        }
     }
 
     try {
@@ -634,7 +647,14 @@ function loadConfigToModal() {
     document.getElementById('okxDemoApiKey').value = currentConfig.okx_demo_api_key;
     document.getElementById('okxDemoApiSecret').value = currentConfig.okx_demo_api_secret;
     document.getElementById('okxDemoApiPassphrase').value = currentConfig.okx_demo_api_passphrase;
+    document.getElementById('devApiKey').value = currentConfig.dev_api_key;
+    document.getElementById('devApiSecret').value = currentConfig.dev_api_secret;
+    document.getElementById('devPassphrase').value = currentConfig.dev_passphrase;
+    document.getElementById('devDemoApiKey').value = currentConfig.dev_demo_api_key;
+    document.getElementById('devDemoApiSecret').value = currentConfig.dev_demo_api_secret;
+    document.getElementById('devDemoApiPassphrase').value = currentConfig.dev_demo_api_passphrase;
     document.getElementById('useTestnet').checked = currentConfig.use_testnet;
+    document.getElementById('useDeveloperApi').checked = currentConfig.use_developer_api;
     document.getElementById('symbol').value = currentConfig.symbol;
     document.getElementById('shortSafetyLinePrice').value = currentConfig.short_safety_line_price;
     document.getElementById('longSafetyLinePrice').value = currentConfig.long_safety_line_price;
@@ -705,6 +725,13 @@ async function saveConfig() {
         okx_demo_api_key: document.getElementById('okxDemoApiKey').value,
         okx_demo_api_secret: document.getElementById('okxDemoApiSecret').value,
         okx_demo_api_passphrase: document.getElementById('okxDemoApiPassphrase').value,
+        dev_api_key: document.getElementById('devApiKey').value,
+        dev_api_secret: document.getElementById('devApiSecret').value,
+        dev_passphrase: document.getElementById('devPassphrase').value,
+        dev_demo_api_key: document.getElementById('devDemoApiKey').value,
+        dev_demo_api_secret: document.getElementById('devDemoApiSecret').value,
+        dev_demo_api_passphrase: document.getElementById('devDemoApiPassphrase').value,
+        use_developer_api: document.getElementById('useDeveloperApi').checked,
         use_testnet: document.getElementById('useTestnet').checked,
         symbol: document.getElementById('symbol').value,
         short_safety_line_price: parseFloat(document.getElementById('shortSafetyLinePrice').value),

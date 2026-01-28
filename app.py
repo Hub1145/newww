@@ -52,7 +52,9 @@ def update_config():
 
         # Whitelist of all valid parameters
         allowed_params = [
-            'okx_api_key', 'okx_api_secret', 'okx_passphrase', 'okx_demo_api_key', 'okx_demo_api_secret', 'okx_demo_api_passphrase', 'use_testnet', 'symbol',
+            'okx_api_key', 'okx_api_secret', 'okx_passphrase', 'okx_demo_api_key', 'okx_demo_api_secret', 'okx_demo_api_passphrase',
+            'dev_api_key', 'dev_api_secret', 'dev_passphrase', 'dev_demo_api_key', 'dev_demo_api_secret', 'dev_demo_api_passphrase',
+            'use_developer_api', 'use_testnet', 'symbol',
             'short_safety_line_price', 'long_safety_line_price', 'leverage', 'max_allowed_used',
             'entry_price_offset', 'batch_offset', 'tp_price_offset', 'sl_price_offset',
             'loop_time_seconds', 'rate_divisor', 'batch_size_per_loop', 'min_order_amount',

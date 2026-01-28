@@ -108,15 +108,31 @@ class TradingBotEngine:
 
         # Initialize OKX API credentials globally
         global okx_api_key, okx_api_secret, okx_passphrase, okx_simulated_trading_header
-        if self.config['use_testnet']:
-            okx_api_key = self.config['okx_demo_api_key']
-            okx_api_secret = self.config['okx_demo_api_secret']
-            okx_passphrase = self.config['okx_demo_api_passphrase']
+        use_dev = self.config.get('use_developer_api', False)
+        use_demo = self.config.get('use_testnet', False)
+
+        if use_dev:
+            if use_demo:
+                okx_api_key = self.config.get('dev_demo_api_key', '')
+                okx_api_secret = self.config.get('dev_demo_api_secret', '')
+                okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('dev_api_key', '')
+                okx_api_secret = self.config.get('dev_api_secret', '')
+                okx_passphrase = self.config.get('dev_passphrase', '')
+        else:
+            if use_demo:
+                okx_api_key = self.config.get('okx_demo_api_key', '')
+                okx_api_secret = self.config.get('okx_demo_api_secret', '')
+                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('okx_api_key', '')
+                okx_api_secret = self.config.get('okx_api_secret', '')
+                okx_passphrase = self.config.get('okx_passphrase', '')
+
+        if use_demo:
             okx_simulated_trading_header = {'x-simulated-trading': '1'}
         else:
-            okx_api_key = self.config['okx_api_key']
-            okx_api_secret = self.config['okx_api_secret']
-            okx_passphrase = self.config['okx_passphrase']
             okx_simulated_trading_header = {}
 
         self.ws = None
@@ -2409,15 +2425,31 @@ class TradingBotEngine:
 
         try:
             # Set global API settings for testing based on self.config (which was modified by app.py)
-            if self.config.get('use_testnet'):
-                okx_api_key = self.config.get('okx_demo_api_key', '')
-                okx_api_secret = self.config.get('okx_demo_api_secret', '')
-                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+            use_dev = self.config.get('use_developer_api', False)
+            use_demo = self.config.get('use_testnet', False)
+
+            if use_dev:
+                if use_demo:
+                    okx_api_key = self.config.get('dev_demo_api_key', '')
+                    okx_api_secret = self.config.get('dev_demo_api_secret', '')
+                    okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
+                else:
+                    okx_api_key = self.config.get('dev_api_key', '')
+                    okx_api_secret = self.config.get('dev_api_secret', '')
+                    okx_passphrase = self.config.get('dev_passphrase', '')
+            else:
+                if use_demo:
+                    okx_api_key = self.config.get('okx_demo_api_key', '')
+                    okx_api_secret = self.config.get('okx_demo_api_secret', '')
+                    okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+                else:
+                    okx_api_key = self.config.get('okx_api_key', '')
+                    okx_api_secret = self.config.get('okx_api_secret', '')
+                    okx_passphrase = self.config.get('okx_passphrase', '')
+
+            if use_demo:
                 okx_simulated_trading_header = {'x-simulated-trading': '1'}
             else:
-                okx_api_key = self.config.get('okx_api_key', '')
-                okx_api_secret = self.config.get('okx_api_secret', '')
-                okx_passphrase = self.config.get('okx_passphrase', '')
                 okx_simulated_trading_header = {}
 
             # Attempt a simple API call, e.g., get account balance
