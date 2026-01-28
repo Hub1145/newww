@@ -245,38 +245,35 @@ class TradingBotEngine:
             self.emit('bot_status', {'running': False})
             return
  
-        # 1. Position Mode Sync (Must happen BEFORE leverage)
-        target_pos_mode = self.config.get('okx_pos_mode', 'net_mode')
-        if not self._okx_set_position_mode(target_pos_mode):
-             self.log("Failed to verify/set position mode. Exiting.", 'error')
-             if not passive_monitoring:
-                self.is_running = False
-             self.emit('bot_status', {'running': False})
-             return
-
-        # 2. Leverage Sync (Requires posSide in Hedge Mode)
-        lev_val = self.config.get('leverage', 20)
-        symbol = self.config['symbol']
-        lev_success = False
-        
-        if target_pos_mode == 'long_short_mode':
-            # Set for both sides in hedge mode
-            l_ok = self._okx_set_leverage(symbol, lev_val, pos_side="long")
-            s_ok = self._okx_set_leverage(symbol, lev_val, pos_side="short")
-            lev_success = l_ok and s_ok
-        else:
-            # Set for net side in one-way mode
-            lev_success = self._okx_set_leverage(symbol, lev_val, pos_side="net")
-
-        if not lev_success:
-            self.log("Failed to set leverage. Exiting.", 'error')
-            if not passive_monitoring:
-                self.is_running = False
-            self.emit('bot_status', {'running': False})
-            return
-        
-        # Only auto-close positions if we are starting TRADING (not just monitoring)
         if not passive_monitoring:
+            # 1. Position Mode Sync (Must happen BEFORE leverage)
+            target_pos_mode = self.config.get('okx_pos_mode', 'net_mode')
+            if not self._okx_set_position_mode(target_pos_mode):
+                 self.log("Failed to verify/set position mode. Exiting.", 'error')
+                 self.is_running = False
+                 self.emit('bot_status', {'running': False})
+                 return
+
+            # 2. Leverage Sync (Requires posSide in Hedge Mode)
+            lev_val = self.config.get('leverage', 20)
+            symbol = self.config['symbol']
+            lev_success = False
+
+            if target_pos_mode == 'long_short_mode':
+                # Set for both sides in hedge mode
+                l_ok = self._okx_set_leverage(symbol, lev_val, pos_side="long")
+                s_ok = self._okx_set_leverage(symbol, lev_val, pos_side="short")
+                lev_success = l_ok and s_ok
+            else:
+                # Set for net side in one-way mode
+                lev_success = self._okx_set_leverage(symbol, lev_val, pos_side="net")
+
+            if not lev_success:
+                self.log("Failed to set leverage. Exiting.", 'error')
+                self.is_running = False
+                self.emit('bot_status', {'running': False})
+                return
+        
             self.log("Checking for and closing any existing open positions...", level="info")
             self._check_and_close_any_open_position()
 
@@ -2206,7 +2203,7 @@ class TradingBotEngine:
                             found_avail_bal = safe_float(detail.get('availBal', '0'))
                             break
             
-            self.account_balance = found_bal
+            self.account_balance = found_avail_bal # Revert to available balance for frontend display
             self.available_balance = found_avail_bal
             self.total_equity = found_total_eq
             total_balance = self.account_balance
