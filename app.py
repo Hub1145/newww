@@ -83,12 +83,20 @@ def update_config():
         if updates_made:
             save_config(current_config)
 
-            # If bot instance exists, reload its config and refresh credentials
-            if bot_engine:
+            # Ensure bot engine exists and has latest config
+            if not bot_engine:
+                bot_engine = TradingBotEngine(config_file, emit_to_client)
+            else:
                 bot_engine.config = bot_engine._load_config()
-                # If not trading, we still refresh credentials for background monitoring
-                if not bot_engine.is_running:
-                    bot_engine.start(passive_monitoring=True)
+
+            # If not trading, we still refresh credentials for background monitoring
+            if not bot_engine.is_running:
+                bot_engine.start(passive_monitoring=True)
+
+            # Check if the currently selected credentials are valid
+            valid, msg = bot_engine.check_credentials()
+            if not valid:
+                return jsonify({'success': False, 'message': f'API Credentials Error: {msg}'})
             
         return jsonify({'success': True, 'message': 'Configuration updated successfully'})
 
@@ -263,7 +271,6 @@ def handle_disconnect():
 @socketio.on('start_bot')
 def handle_start_bot(data=None):
     global bot_engine
-    print("--- DEBUG: handle_start_bot called ---", flush=True)
 
     try:
         if bot_engine and bot_engine.is_running:

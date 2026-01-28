@@ -797,7 +797,7 @@ async function saveConfig() {
         if (result.success) {
             currentConfig = newConfig;
             configModal.hide();
-            showNotification('Configuration saved successfully', 'success');
+            showNotification(result.message || 'Configuration saved successfully', 'success');
             updateParametersDisplay(); // Refresh the parameters display
         } else {
             showNotification(result.message, 'error');
