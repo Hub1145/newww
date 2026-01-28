@@ -139,6 +139,8 @@ def get_status():
     if not bot_engine:
         try:
             bot_engine = TradingBotEngine(config_file, emit_to_client)
+            # Start background monitoring automatically
+            bot_engine.start(passive_monitoring=True)
         except Exception as e:
             logging.error(f"Error initializing bot engine for status: {e}")
             return jsonify({'running': False, 'error': str(e)}), 500
@@ -190,9 +192,17 @@ def get_status():
  
 @socketio.on('connect')
 def handle_connect(sid):
+    global bot_engine
     logging.info(f'Client connected: {sid}')
     emit('connection_status', {'connected': True}, room=sid)
  
+    if not bot_engine:
+        try:
+            bot_engine = TradingBotEngine(config_file, emit_to_client)
+            bot_engine.start(passive_monitoring=True)
+        except Exception as e:
+            logging.error(f"Error auto-initializing bot engine on connect: {e}")
+
     if bot_engine:
         emit('bot_status', {'running': bot_engine.is_running}, room=sid)
         # Emit current account info
@@ -253,14 +263,14 @@ def handle_start_bot(data=None):
     print("--- DEBUG: handle_start_bot called ---", flush=True)
 
     try:
-        config = load_config() # This is line 111
-
         if bot_engine and bot_engine.is_running:
             emit('error', {'message': 'Bot is already running'})
             return
 
+        if not bot_engine:
+             bot_engine = TradingBotEngine(config_file, emit_to_client)
+
         try:
-            bot_engine = TradingBotEngine(config_file, emit_to_client) # Pass config_file
             bot_engine.start()
             emit('bot_status', {'running': True}) # Explicitly emit status after starting
             emit('success', {'message': 'Bot started successfully'})

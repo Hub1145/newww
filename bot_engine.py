@@ -242,24 +242,29 @@ class TradingBotEngine:
         elif level == 'critical':
             logging.critical(message)
     
-    def start(self):
-        if self.is_running:
-            self.log('Bot is already running', 'warning')
+    def start(self, passive_monitoring=False):
+        if self.is_running and not passive_monitoring:
+            self.log('Bot is already trading', 'warning')
             return
         
-        self.is_running = True
-        self.log('Bot starting...', 'info')
+        if not passive_monitoring:
+            self.is_running = True
+            self.log('Bot starting trading logic...', 'info')
+        else:
+            self.log('Bot starting background monitoring...', 'info')
         
         # New initialization sequence for OKX
         if not get_okx_server_time_and_offset(self.log):
             self.log("Failed to synchronize server time. Please check network connection or API.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
         
         if not self._fetch_product_info(self.config['symbol']):
             self.log("Failed to fetch product info. Exiting.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
  
@@ -267,7 +272,8 @@ class TradingBotEngine:
         target_pos_mode = self.config.get('okx_pos_mode', 'net_mode')
         if not self._okx_set_position_mode(target_pos_mode):
              self.log("Failed to verify/set position mode. Exiting.", 'error')
-             self.is_running = False
+             if not passive_monitoring:
+                self.is_running = False
              self.emit('bot_status', {'running': False})
              return
 
@@ -287,35 +293,53 @@ class TradingBotEngine:
 
         if not lev_success:
             self.log("Failed to set leverage. Exiting.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
         
-        self.log("Checking for and closing any existing open positions...", level="info")
-        self._check_and_close_any_open_position()
+        # Only auto-close positions if we are starting TRADING (not just monitoring)
+        if not passive_monitoring:
+            self.log("Checking for and closing any existing open positions...", level="info")
+            self._check_and_close_any_open_position()
 
-        self.log('Bot initialized. Starting live trading connection...', 'info')
+        # Check if threads are already running
+        if getattr(self, 'ws_thread', None) and self.ws_thread.is_alive():
+            self.log("WebSocket and Management threads are already active.", level="debug")
+            return
+
+        self.log('Bot initialized. Starting live connection threads...', 'info')
         self.stop_event.clear()
         self.ws_thread = threading.Thread(target=self._initialize_websocket_and_start_main_loop, daemon=True)
         self.ws_thread.start()
 
         # Start unified management thread (Account Info + Cancellation)
-        self.mgmt_thread = threading.Thread(target=self._unified_management_loop, daemon=True)
-        self.mgmt_thread.start()
+        # Note: In the previous code, this was started in start(), but it should be part of the thread group
+        if not getattr(self, 'mgmt_thread', None) or not self.mgmt_thread.is_alive():
+            self.mgmt_thread = threading.Thread(target=self._unified_management_loop, daemon=True)
+            self.mgmt_thread.start()
     
     def stop(self):
         if not self.is_running:
-            self.log('Bot is not running', 'warning')
+            self.log('Bot trading is not active', 'warning')
             return
         
         self.is_running = False
-        self.log('Bot stopping...', 'info')
+        self.log('Bot trading logic paused. Background monitoring remains active.', 'info')
         
-        self.stop_event.set() # Signal all threads to stop
-        if self.ws:
-            self.ws.close()
-        
+        # We no longer set stop_event or close WS here to allow background Auto-Exit to work
         self.emit('bot_status', {'running': False})
+
+    def shutdown(self):
+        """Truly stops all threads and connections."""
+        self.is_running = False
+        self.stop_event.set()
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+        self.log('Bot fully shut down.', 'info')
     
     def _load_config(self):
         try:
@@ -1919,26 +1943,28 @@ class TradingBotEngine:
             now = time.time()
             try:
                 # 1. High Frequency: Cancellation Check (every ~1s)
+                # Note: Only cancel if trading is active or we still have tracked pending orders
                 self._check_cancel_conditions()
 
-                # 2. PnL-Based Auto-Exit Check
+                # 2. PnL-Based Auto-Exit Check (Now works even in Stop mode)
                 use_auto_cancel = self.config.get('use_pnl_auto_cancel', False)
                 threshold = self.config.get('pnl_auto_cancel_threshold', 100.0)
-                if use_auto_cancel and self.net_profit >= threshold and self.is_running:
-                    self.log(f"PNL TARGET HIT! Profit ${self.net_profit:.2f} >= ${threshold:.2f}. Triggering Auto-Exit Shutdown.", level="critical")
-                    # Stop the bot first to prevent new orders
+                if use_auto_cancel and self.net_profit >= threshold:
+                    self.log(f"PNL TARGET HIT! Profit ${self.net_profit:.2f} >= ${threshold:.2f}. Triggering Auto-Exit Liquidate.", level="critical")
+
+                    # Stop trading logic if active
                     self.is_running = False
-                    self.stop_event.set()
+
                     # Cancel all pending orders and close all positions
                     self._close_all_entry_orders()
                     self._check_and_close_any_open_position()
                     self.emit('bot_status', {'running': False})
-                    self.log("Auto-Exit Shutdown Complete.", level="info")
-                    return # Exit the thread
+                    self.log("Auto-Exit Liquidate Complete.", level="info")
+                    # We don't exit the thread, as we want to continue monitoring
                 
                 # 3. Connection Health: Stale Price Monitor
                 price_age = now - self.last_price_update_time
-                if price_age > 30 and self.is_running:
+                if price_age > 30:
                      self.log(f"WARNING: Market price is STALE ({price_age:.1f}s). Re-initializing WebSocket...", level="warning")
                      # Reset update time to avoid spamming reconnects
                      self.last_price_update_time = now 
@@ -1961,8 +1987,12 @@ class TradingBotEngine:
             self.log("Trading loop started.", level="debug")
 
             while not self.stop_event.is_set():
+                if not self.is_running:
+                    time.sleep(1)
+                    continue
+
                 # 1. Entry Loop
-                while not self.stop_event.is_set():
+                while self.is_running and not self.stop_event.is_set():
                     self.log("-" * 90)
                     self.log("-" * 90)
                     self.log("Check Entry Condition")
@@ -2100,10 +2130,15 @@ class TradingBotEngine:
             
             if response and response.get('code') == '0':
                 fills = response.get('data', [])
+
+                # Calculate time window (e.g. last 24 hours) to include manual orders and past session profit
+                now_ms = int(time.time() * 1000)
+                time_window_ms = 24 * 60 * 60 * 1000 # 24 Hours
+                start_time_limit = now_ms - time_window_ms
+
                 for fill in fills:
-                     # Filter for session only
                      fill_ts = int(fill.get('ts', 0))
-                     if fill_ts < self.bot_start_time:
+                     if fill_ts < start_time_limit:
                          continue
 
                      # 'pnl' field contains realized profit for closing trades
