@@ -83,9 +83,12 @@ def update_config():
         if updates_made:
             save_config(current_config)
 
-            # If bot is not running, reload its config immediately if instance exists
-            if bot_engine and not bot_engine.is_running:
+            # If bot instance exists, reload its config and refresh credentials
+            if bot_engine:
                 bot_engine.config = bot_engine._load_config()
+                # If not trading, we still refresh credentials for background monitoring
+                if not bot_engine.is_running:
+                    bot_engine.start(passive_monitoring=True)
             
         return jsonify({'success': True, 'message': 'Configuration updated successfully'})
 
@@ -164,7 +167,7 @@ def get_status():
         'net_profit': bot_engine.net_profit,
         'total_trades': total_active_trades_count,
         'trade_fees': bot_engine.trade_fees,
-        'total_capital': bot_engine.initial_total_capital,
+        'total_capital': bot_engine.total_equity,
         'used_amount': bot_engine.used_amount_notional,
         'remaining_amount': bot_engine.remaining_amount_notional,
         'max_allowed_used_display': bot_engine.max_allowed_display,
@@ -229,7 +232,7 @@ def handle_connect(sid):
             remaining_amount_notional = max_notional_capacity - used_amount_notional
 
         emit('account_update', {
-            'total_capital': bot_engine.initial_total_capital or total_balance,
+            'total_capital': bot_engine.total_equity or total_balance,
             'max_allowed_used_display': max_allowed_margin, # Unleveraged
             'max_amount_display': max_amount_display,       # Unleveraged
             'used_amount': used_amount_notional,            # Leveraged

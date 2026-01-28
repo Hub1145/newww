@@ -106,34 +106,7 @@ class TradingBotEngine:
             file_handler.setLevel(logging.DEBUG) # File gets DEBUG and higher
             root_logger.addHandler(file_handler)
 
-        # Initialize OKX API credentials globally
-        global okx_api_key, okx_api_secret, okx_passphrase, okx_simulated_trading_header
-        use_dev = self.config.get('use_developer_api', False)
-        use_demo = self.config.get('use_testnet', False)
-
-        if use_dev:
-            if use_demo:
-                okx_api_key = self.config.get('dev_demo_api_key', '')
-                okx_api_secret = self.config.get('dev_demo_api_secret', '')
-                okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
-            else:
-                okx_api_key = self.config.get('dev_api_key', '')
-                okx_api_secret = self.config.get('dev_api_secret', '')
-                okx_passphrase = self.config.get('dev_passphrase', '')
-        else:
-            if use_demo:
-                okx_api_key = self.config.get('okx_demo_api_key', '')
-                okx_api_secret = self.config.get('okx_demo_api_secret', '')
-                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
-            else:
-                okx_api_key = self.config.get('okx_api_key', '')
-                okx_api_secret = self.config.get('okx_api_secret', '')
-                okx_passphrase = self.config.get('okx_passphrase', '')
-
-        if use_demo:
-            okx_simulated_trading_header = {'x-simulated-trading': '1'}
-        else:
-            okx_simulated_trading_header = {}
+        self._apply_api_credentials()
 
         self.ws = None
         self.ws_thread = None
@@ -154,6 +127,7 @@ class TradingBotEngine:
         self.last_price_update_time = time.time() # High-precision timestamp of last price arrival
         self.account_balance = 0.0
         self.available_balance = 0.0
+        self.total_equity = 0.0
         self.initial_total_capital = 0.0 # Session-based, in-memory only
         self.account_info_lock = threading.Lock()
         self.net_profit = 0.0 # Track actual PnL
@@ -253,6 +227,9 @@ class TradingBotEngine:
         else:
             self.log('Bot starting background monitoring...', 'info')
         
+        # 0. Apply Credentials
+        self._apply_api_credentials()
+
         # New initialization sequence for OKX
         if not get_okx_server_time_and_offset(self.log):
             self.log("Failed to synchronize server time. Please check network connection or API.", 'error')
@@ -305,7 +282,7 @@ class TradingBotEngine:
 
         # Check if threads are already running
         if getattr(self, 'ws_thread', None) and self.ws_thread.is_alive():
-            self.log("WebSocket and Management threads are already active.", level="debug")
+            self.log("WebSocket and Management threads are already active. Re-applied any credential changes.", level="debug")
             return
 
         self.log('Bot initialized. Starting live connection threads...', 'info')
@@ -387,6 +364,37 @@ class TradingBotEngine:
     # ================================================================================
     # OKX API Helper Functions (Adapted as methods)
     # ================================================================================
+
+    def _apply_api_credentials(self):
+        """Applies configured API credentials to global variables used by requests."""
+        global okx_api_key, okx_api_secret, okx_passphrase, okx_simulated_trading_header
+        use_dev = self.config.get('use_developer_api', False)
+        use_demo = self.config.get('use_testnet', False)
+
+        if use_dev:
+            if use_demo:
+                okx_api_key = self.config.get('dev_demo_api_key', '')
+                okx_api_secret = self.config.get('dev_demo_api_secret', '')
+                okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('dev_api_key', '')
+                okx_api_secret = self.config.get('dev_api_secret', '')
+                okx_passphrase = self.config.get('dev_passphrase', '')
+        else:
+            if use_demo:
+                okx_api_key = self.config.get('okx_demo_api_key', '')
+                okx_api_secret = self.config.get('okx_demo_api_secret', '')
+                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('okx_api_key', '')
+                okx_api_secret = self.config.get('okx_api_secret', '')
+                okx_passphrase = self.config.get('okx_passphrase', '')
+
+        if use_demo:
+            okx_simulated_trading_header = {'x-simulated-trading': '1'}
+        else:
+            okx_simulated_trading_header = {}
+        self.log(f"API Credentials Applied: {'Developer' if use_dev else 'User'} | {'Demo' if use_demo else 'Live'}", level="debug")
 
     def _save_config(self):
         try:
@@ -2184,20 +2192,23 @@ class TradingBotEngine:
         response_balance = self._okx_request("GET", path_balance, params=params_balance)
 
         with self.account_info_lock:
+            found_total_eq = 0.0
             found_avail_bal = 0.0
-            found_total_bal = 0.0
+            found_bal = 0.0
             if response_balance and response_balance.get('code') == '0':
                 data = response_balance.get('data', [])
                 if data and len(data) > 0:
                     account_details = data[0]
+                    found_total_eq = safe_float(account_details.get('totalEq', '0'))
                     for detail in account_details.get('details', []):
                         if detail.get('ccy') == 'USDT':
-                            found_total_bal = safe_float(detail.get('bal', '0'))
+                            found_bal = safe_float(detail.get('bal', '0'))
                             found_avail_bal = safe_float(detail.get('availBal', '0'))
                             break
             
-            self.account_balance = found_avail_bal 
+            self.account_balance = found_bal
             self.available_balance = found_avail_bal
+            self.total_equity = found_total_eq
             total_balance = self.account_balance
             available_balance = self.available_balance
         
@@ -2437,7 +2448,7 @@ class TradingBotEngine:
         # Emit data to frontend
         self.emit('account_update', {
             'total_trades': total_active_trades_count,
-            'total_capital': self.initial_total_capital,
+            'total_capital': self.total_equity, # User: Total Capital should be estimated available balance (Equity)
             'max_allowed_used_display': max_allowed_display, 
             'max_amount_display': max_amount_display,
             'used_amount': used_amount_notional, 
