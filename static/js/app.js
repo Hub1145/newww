@@ -232,6 +232,9 @@ function setupSocketListeners() {
 
     socket.on('error', (data) => {
         showNotification(data.message, 'error');
+        // Re-enable start/stop button if it was disabled during an attempt
+        const btn = document.getElementById('startStopBtn');
+        if (btn) btn.disabled = false;
     });
 
     socket.on('connect', () => {

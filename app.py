@@ -273,6 +273,12 @@ def handle_start_bot(data=None):
         if not bot_engine:
              bot_engine = TradingBotEngine(config_file, emit_to_client)
 
+        # 1. Check Credentials before starting
+        valid, msg = bot_engine.check_credentials()
+        if not valid:
+            emit('error', {'message': f'API Credentials Error: {msg}'})
+            return
+
         try:
             bot_engine.start()
             emit('bot_status', {'running': True}) # Explicitly emit status after starting

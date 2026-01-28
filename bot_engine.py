@@ -216,6 +216,31 @@ class TradingBotEngine:
         elif level == 'critical':
             logging.critical(message)
     
+    def check_credentials(self):
+        """Verifies if the current API credentials are valid and configured."""
+        self._apply_api_credentials()
+
+        global okx_api_key, okx_api_secret, okx_passphrase
+        if not okx_api_key or not okx_api_secret or not okx_passphrase:
+            return False, "API Key, Secret, or Passphrase missing for selected mode."
+
+        try:
+            path = "/api/v5/account/balance"
+            params = {"ccy": "USDT"}
+            # Use max_retries=1 to fail quickly if invalid
+            response = self._okx_request("GET", path, params=params, max_retries=1)
+
+            if response and response.get('code') == '0':
+                return True, "Credentials valid."
+            elif response and response.get('code') == '50110': # Invalid API key
+                return False, "Invalid API credentials."
+            elif response and response.get('msg'):
+                return False, f"API Error: {response.get('msg')}"
+            else:
+                return False, "Unknown API error during validation."
+        except Exception as e:
+            return False, f"Connection error: {str(e)}"
+
     def start(self, passive_monitoring=False):
         if self.is_running and not passive_monitoring:
             self.log('Bot is already trading', 'warning')
@@ -229,6 +254,15 @@ class TradingBotEngine:
         
         # 0. Apply Credentials
         self._apply_api_credentials()
+
+        # Validation: check if credentials are provided
+        global okx_api_key, okx_api_secret, okx_passphrase
+        if not okx_api_key or not okx_api_secret or not okx_passphrase:
+            self.log("⚠️ API Credentials not configured for the selected mode.", "error")
+            if not passive_monitoring:
+                self.emit('error', {'message': 'API Credentials not configured.'})
+                self.is_running = False
+            return
 
         # New initialization sequence for OKX
         if not get_okx_server_time_and_offset(self.log):
@@ -1902,10 +1936,12 @@ class TradingBotEngine:
             # 3. Entry Check (Taker Avoidance / Directional Move)
             is_entry_unfavorable = False
             if signal == 1: # Long
-                if current_market_price < limit_price:
+                # Cancel if Entry < Market (Price moved up, making order a taker or too high)
+                if current_market_price > limit_price:
                     is_entry_unfavorable = True
             else: # Short
-                if current_market_price > limit_price:
+                # Cancel if Entry > Market (Price moved down, making order a taker or too low)
+                if current_market_price < limit_price:
                     is_entry_unfavorable = True
 
             # Execute Cancellation based on priority
