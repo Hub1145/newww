@@ -1502,21 +1502,6 @@ class TradingBotEngine:
             self.entry_order_with_sl = None
         self.log(f"Entry state reset. Reason: {reason}", level="info")
 
-    def _cancel_all_exit_orders_and_reset(self, reason):
-        with self.position_lock:
-            orders_to_cancel = list(self.position_exit_orders.values())
-
-            self.in_position = False
-            self.position_entry_price = 0.0
-            self.position_qty = 0.0
-            self.current_take_profit = 0.0
-            self.current_stop_loss = 0.0
-            self.position_exit_orders = {}
-            self.pending_entry_order_id = None
-            self.entry_reduced_tp_flag = False
-
-        with self.entry_order_sl_lock:
-            self.entry_order_with_sl = None
 
         self.log("=" * 80, level="info")
         self.log(f"POSITION CLOSED - Reason: {reason}", level="info")
@@ -2689,7 +2674,6 @@ class TradingBotEngine:
 
             if modified_count > 0:
                 self.log(f"Successfully modified TP/SL for {modified_count} sides.", level="info")
-                self.emit('success', {'message': f'Successfully modified TP/SL for {modified_count} sides.'})
             else:
                 self.log("No active positions found (or matched criteria) to modify TP/SL.", level="debug")
         
@@ -2739,7 +2723,6 @@ class TradingBotEngine:
 
             if cancelled_count > 0:
                 self.log(f"✅ Cancelled {cancelled_count} pending orders.", level="info")
-                self.emit('success', {'message': f'Successfully cancelled {cancelled_count} pending orders.'})
             else:
                 self.log("No orders to cancel.", level="warning")
                 self.emit('warning', {'message': 'No pending orders found to cancel.'})
@@ -2760,10 +2743,8 @@ class TradingBotEngine:
             
             if closed_pos:
                 self.log("✓ Emergency SL: Positions closed and orders cancelled.", level="info")
-                self.emit('success', {'message': 'Emergency SL: All positions closed and orders cancelled.'})
             else:
                 self.log("✓ Emergency SL: Orders cancelled (no active positions found).", level="info")
-                self.emit('success', {'message': 'Emergency SL: All orders cancelled.'})
         except Exception as e:
             self.log(f"Error during Emergency SL: {e}", level="error")
             self.emit('error', {'message': f'Emergency SL failed: {e}'})

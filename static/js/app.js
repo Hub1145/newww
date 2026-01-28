@@ -271,13 +271,13 @@ function updateBotStatus(running) {
 }
 
 function updateAccountMetrics(data) {
-    document.getElementById('totalCapital').textContent = `$${data.total_capital !== undefined ? data.total_capital.toFixed(2) : '0.00'}`;
-    document.getElementById('maxAllowedUsedDisplay').textContent = `$${data.max_allowed_used_display !== undefined ? data.max_allowed_used_display.toFixed(2) : '0.00'}`;
-    document.getElementById('maxAmountDisplay').textContent = `$${data.max_amount_display !== undefined ? data.max_amount_display.toFixed(2) : '0.00'}`;
-    document.getElementById('usedAmount').textContent = `$${data.used_amount !== undefined ? data.used_amount.toFixed(2) : '0.00'}`;
-    document.getElementById('remainingAmount').textContent = `$${data.remaining_amount !== undefined ? data.remaining_amount.toFixed(2) : '0.00'}`;
-    document.getElementById('balance').textContent = `$${data.total_balance !== undefined ? data.total_balance.toFixed(2) : '0.00'}`;
-    document.getElementById('netProfit').textContent = `$${data.net_profit !== undefined ? data.net_profit.toFixed(2) : '0.00'}`;
+    document.getElementById('totalCapital').textContent = `$${data.total_capital !== undefined ? Number(data.total_capital).toFixed(2) : '0.00'}`;
+    document.getElementById('maxAllowedUsedDisplay').textContent = `$${data.max_allowed_used_display !== undefined ? Number(data.max_allowed_used_display).toFixed(2) : '0.00'}`;
+    document.getElementById('maxAmountDisplay').textContent = `$${data.max_amount_display !== undefined ? Number(data.max_amount_display).toFixed(2) : '0.00'}`;
+    document.getElementById('usedAmount').textContent = `$${data.used_amount !== undefined ? Number(data.used_amount).toFixed(2) : '0.00'}`;
+    document.getElementById('remainingAmount').textContent = `$${data.remaining_amount !== undefined ? Number(data.remaining_amount).toFixed(2) : '0.00'}`;
+    document.getElementById('balance').textContent = `$${data.total_balance !== undefined ? Number(data.total_balance).toFixed(2) : '0.00'}`;
+    document.getElementById('netProfit').textContent = `$${data.net_profit !== undefined ? Number(data.net_profit).toFixed(2) : '0.00'}`;
     document.getElementById('totalTrades').textContent = data.total_trades !== undefined ? data.total_trades : '0';
 
     // Calculate fee breakdown based on user's formula
@@ -333,13 +333,13 @@ function updatePositionDisplay(positionData) {
                 </div>
                 <div class="row g-0">
                     <div class="col-6 small text-muted">Entry Price:</div>
-                    <div class="col-6 small text-end">${pos.price.toFixed(4)}</div>
+                    <div class="col-6 small text-end">${Number(pos.price || 0).toFixed(4)}</div>
                     <div class="col-6 small text-muted">Quantity:</div>
-                    <div class="col-6 small text-end">${pos.qty.toFixed(4)}</div>
+                    <div class="col-6 small text-end">${Number(pos.qty || 0).toFixed(4)}</div>
                     <div class="col-6 small text-muted">Current TP:</div>
-                    <div class="col-6 small text-end text-success">${(pos.tp || positionData.current_take_profit || 0).toFixed(4)}</div>
+                    <div class="col-6 small text-end text-success">${Number(pos.tp || (positionData && positionData.current_take_profit) || 0).toFixed(4)}</div>
                     <div class="col-6 small text-muted">Current SL:</div>
-                    <div class="col-6 small text-end text-danger">${(pos.sl || positionData.current_stop_loss || 0).toFixed(4)}</div>
+                    <div class="col-6 small text-end text-danger">${Number(pos.sl || (positionData && positionData.current_stop_loss) || 0).toFixed(4)}</div>
                 </div>
             </div>
         `;
