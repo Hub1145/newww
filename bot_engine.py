@@ -1840,100 +1840,44 @@ class TradingBotEngine:
                              del self.pending_entry_order_details[order_id]
                 continue
 
-            # 2. TP Check
-            # We need to calculate pending TP
+            # 2. TP Check (Missed Opportunity)
             tp_offset = self.config.get('tp_price_offset', 0)
-            if signal == 1: # Long
-                 pending_tp = limit_price + tp_offset
-                 # "TP < Market" for Long? (Entry+Offset < Market). Price rose above TP.
-                 # User Log says "TP<Market".
-                 # If this condition is "TP < Market".
-                 cond_tp = pending_tp < current_market_price
-            else: # Short
-                 pending_tp = limit_price - tp_offset
-                 # User Log says "TP<Market". (Entry-Offset < Market).
-                 # This is normally TRUE for Short.
-                 # If user meant "Market < TP" (Price dropped below TP)?
-                 # Let's map "TP < Market" text to "Unfavorable Direction"?
-                 # Actually, for Short, "TP < Market" is the normal 'holding' state.
-                 # "Market below TP" is the 'done' state.
-                 # If user wants cancel on "TP < Market" for Short, it would cancel immediately.
-                 # I suspect user logic is inverted or I am misinterpreting "TP<Market" as the LABEL vs the LOGIC.
-                 # Let's assume the condition is "Price went past TP".
-                 # Short: Market < TP.
-                 # Long: Market > TP.
-                 
-                 # But sticking to the specific string requested "Cancel-2:TP<Market".
-                 # I will log exactly that.
-                 cond_tp = pending_tp < current_market_price
-
-            msg_tp = "Yes" if cond_tp else "None"
-            # However, for Short, cond_tp is almost always Yes.
-            # If I cancel on "Yes", it breaks.
-            # I will disable the ACTUAL cancel for now if it seems wrong, or assume "None" means "False".
-            # User said: "Cancel-2:TP<Market: None".
-            # For Short (Entry 2982, TP 2976, Market 2980).
-            # TP(2976) < Market(2980). Result is TRUE.
-            # But log says "None".
-            # So "TP < Market" condition must be FALSE?
-            # 2976 < 2980 is True.
-            # So the condition for "None" must be "TP >= Market"?
-            # Or maybe the label is "Cancel if TP < Market" and the value is "None" (False).
-            # But 2976 IS < 2980.
-            # This implies the Cancel Trigger is NOT "TP < Market".
-            # It might be "Market < TP"? (For Short).
-            # If Market (2980) < TP (2976)? False. -> None.
-            # OK, so for Short, the condition being checked is likely "Market < TP".
-            # And the label "Cancel-2:TP<Market" is just a label?
-            # Or maybe "TP < Market" is the condition for LONG?
-            # Let's use standard logic: "Target Passed".
-            # For Short: Market < TP.
-            # For Long: Market > TP.
-            
             is_target_passed = False
-            # REVERSED: Based on user feedback "Reverse" and "Not market below tp, But tp below market"
-            if signal == 1: # Long
-                 # Cancel if TP is BELOW market (We passed it)
-                 if current_market_price > pending_tp: is_target_passed = True
-            else: # Short
-                 # Cancel if TP is ABOVE market (We passed it on the way down)
-                 if current_market_price < pending_tp: is_target_passed = True
+            pending_tp = 0.0
             
-            # Logs removed to reduce volume, consolidated below at debug level
-            
-            # 3. Entry Check (Internal state calculation)
-            cond_entry = False
             if signal == 1: # Long
-                 if limit_price < current_market_price: cond_entry = True
+                pending_tp = limit_price + tp_offset
+                if current_market_price > pending_tp:
+                    is_target_passed = True
             else: # Short
-                 if limit_price > current_market_price: cond_entry = True
+                pending_tp = limit_price - tp_offset
+                if current_market_price < pending_tp:
+                    is_target_passed = True
 
-            # REFINED LOGIC: Always respect the FULL seconds timer if price hasn't hit TP/Entry rules.
-            # LOGGING AUDIT: Consolidate logs to reduce noise
-            log_state = f"C1:{'Y' if time_passed else 'N'}|C2:{'Y' if is_target_passed else 'N'}|C3:{'Y' if cond_entry else 'N'}"
-            self.log(f"Order {order_id} Monitor: {log_state}", level="debug")
+            # 3. Entry Check (Taker Avoidance / Directional Move)
+            is_entry_unfavorable = False
+            if signal == 1: # Long
+                if current_market_price < limit_price:
+                    is_entry_unfavorable = True
+            else: # Short
+                if current_market_price > limit_price:
+                    is_entry_unfavorable = True
 
             # Execute Cancellation based on priority
             should_cancel = False
             cancel_msg = ""
             
-            # STRICT TIMER ENFORCEMENT: Time-limit is the absolute rule
             if time_passed:
                 should_cancel = True
                 cancel_msg = f"Time Limit ({cancel_unfilled_seconds}s) reached"
             
-            # Sub-flag: Should we also cancel on price? 
-            # (Keeping price rules active but secondary to the log)
             elif is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
-                # should_cancel = True # Re-evaluate if we want to wait NO MATTER WHAT
-                # cancel_msg = "TP Rule Triggered"
-                pass # DECISION: Following user "it still closes before countdown finishes"
-                     # I will temporarily bypass price-based cancellations for pending orders
-                     # so they stay for the FULL countdown.
-            elif cond_entry and self.config.get('cancel_on_entry_price_below_market'):
-                # should_cancel = True
-                # cancel_msg = "Entry Rule Triggered"
-                pass 
+                should_cancel = True
+                cancel_msg = f"TP Price Unfavorable (Market {current_market_price:.2f} passed TP {pending_tp:.2f})"
+
+            elif is_entry_unfavorable and self.config.get('cancel_on_entry_price_below_market'):
+                should_cancel = True
+                cancel_msg = f"Entry Price Unfavorable (Market {current_market_price:.2f} passed Entry {limit_price:.2f})"
 
             if should_cancel:
                 self.log(f"Cancel Order {order_id} ({cancel_msg})")
