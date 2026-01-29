@@ -169,6 +169,7 @@ class TradingBotEngine:
         
         self.total_trades_count = 0 # Persistent counter for individual fills
         self.confirmed_subscriptions = set()
+        self.credentials_invalid = False
 
         self.intervals = {
             '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
@@ -193,6 +194,10 @@ class TradingBotEngine:
         
         # If the level of this message is lower than the configured level, skip it
         if current_level < configured_level:
+            return
+
+        # Suppress non-critical logs if credentials are known to be invalid
+        if self.credentials_invalid and level.lower() != 'critical':
             return
 
         timestamp = datetime.now().strftime('%H:%M:%S')
@@ -251,16 +256,38 @@ class TradingBotEngine:
             self.log('Bot starting trading logic...', 'info')
         else:
             self.log('Bot starting background monitoring...', 'info')
-        
+
         # 0. Apply Credentials
         self._apply_api_credentials()
 
-        # Validation: check if credentials are provided
+        # 0.1 Perform initial credential validity check
+        # Validation: check if credentials are provided first
         global okx_api_key, okx_api_secret, okx_passphrase
         if not okx_api_key or not okx_api_secret or not okx_passphrase:
             self.log("⚠️ API Credentials not configured for the selected mode.", "error")
+            self.credentials_invalid = True
             if not passive_monitoring:
                 self.emit('error', {'message': 'API Credentials not configured.'})
+                self.is_running = False
+            return
+
+        self.log("Verifying API credentials...", level="debug")
+        valid, msg = self.check_credentials()
+        if not valid:
+            # We only set credentials_invalid if it was an auth error (handled in _okx_request)
+            # or if it's explicitly an auth-related message
+            if any(err in msg.lower() for err in ['invalid', 'credentials', 'key', 'secret', 'passphrase', '401']):
+                self.credentials_invalid = True
+
+            if not self.credentials_invalid:
+                 # If it's a network error, we don't set credentials_invalid,
+                 # but we might still want to stop the bot from starting if not passive
+                 self.log(f"⚠️ API Connection/Verification Failed: {msg}", "error")
+            else:
+                 self.log(f"⚠️ API Credentials Verification Failed: {msg}", "error")
+
+            if not passive_monitoring:
+                self.emit('error', {'message': f'API Credentials Error: {msg}'})
                 self.is_running = False
             return
 
@@ -365,6 +392,8 @@ class TradingBotEngine:
                 config.setdefault('max_allowed_used', 1000.0)
                 config.setdefault('cancel_on_tp_price_below_market', True)
                 config.setdefault('cancel_on_entry_price_below_market', True)
+                config.setdefault('cancel_on_tp_price_above_market', True)
+                config.setdefault('cancel_on_entry_price_above_market', True)
                 config.setdefault('websocket_timeframes', ['1m', '5m']) # Add default for websocket_timeframes
                 config.setdefault('direction', 'long')
                 config.setdefault('mode', 'cross') # Changed default mode to 'cross'
@@ -407,6 +436,7 @@ class TradingBotEngine:
     def _apply_api_credentials(self):
         """Applies configured API credentials to global variables used by requests."""
         global okx_api_key, okx_api_secret, okx_passphrase, okx_simulated_trading_header
+        self.credentials_invalid = False
         use_dev = self.config.get('use_developer_api', False)
         use_demo = self.config.get('use_testnet', False)
 
@@ -444,6 +474,9 @@ class TradingBotEngine:
             self.log(f"Error saving config: {e}", level="error")
 
     def _okx_request(self, method, path, params=None, body_dict=None, max_retries=3):
+        if self.credentials_invalid:
+            return None
+
         local_dt = datetime.now(timezone.utc)
         adjusted_dt = local_dt + timedelta(milliseconds=server_time_offset)
         timestamp = adjusted_dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
@@ -473,6 +506,9 @@ class TradingBotEngine:
         headers.update(okx_simulated_trading_header)
 
         for attempt in range(max_retries):
+            if self.credentials_invalid:
+                return None
+
             try:
                 req_func = getattr(requests, method.lower(), None)
                 if not req_func:
@@ -490,12 +526,23 @@ class TradingBotEngine:
                 if response.status_code != 200:
                     try:
                         error_json = response.json()
-                        self.log(f"API Error: Status={response.status_code}, Code={error_json.get('code')}, Msg={error_json.get('msg')}. Full Response: {error_json}", level="error")
                         okx_error_code = error_json.get('code')
+
+                        # Check for invalid credential error codes
+                        if okx_error_code in ['50110', '50111', '50113'] or response.status_code == 401:
+                            if not self.credentials_invalid:
+                                self.log(f"CRITICAL: Invalid API credentials detected (Status={response.status_code}, Code={okx_error_code}). Suppressing further API errors.", level="critical")
+                                self.credentials_invalid = True
+                            return error_json
+
+                        if not self.credentials_invalid:
+                            self.log(f"API Error: Status={response.status_code}, Code={okx_error_code}, Msg={error_json.get('msg')}. Full Response: {error_json}", level="error")
+
                         if okx_error_code:
                             return error_json
                     except json.JSONDecodeError:
-                        self.log(f"API Error: Status={response.status_code}, Response: {response.text}", level="error")
+                        if not self.credentials_invalid:
+                            self.log(f"API Error: Status={response.status_code}, Response: {response.text}", level="error")
 
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
@@ -1946,13 +1993,21 @@ class TradingBotEngine:
                 should_cancel = True
                 cancel_msg = f"Time Limit ({cancel_unfilled_seconds}s) reached"
             
-            elif is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
-                should_cancel = True
-                cancel_msg = f"TP Price Unfavorable (Market {current_market_price:.2f} passed TP {pending_tp:.2f})"
+            elif signal == -1: # Short
+                if is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
+                    should_cancel = True
+                    cancel_msg = f"Short TP Price Unfavorable (Market {current_market_price:.2f} passed TP {pending_tp:.2f})"
+                elif is_entry_unfavorable and self.config.get('cancel_on_entry_price_below_market'):
+                    should_cancel = True
+                    cancel_msg = f"Short Entry Price Unfavorable (Market {current_market_price:.2f} passed Entry {limit_price:.2f})"
 
-            elif is_entry_unfavorable and self.config.get('cancel_on_entry_price_below_market'):
-                should_cancel = True
-                cancel_msg = f"Entry Price Unfavorable (Market {current_market_price:.2f} passed Entry {limit_price:.2f})"
+            elif signal == 1: # Long
+                if is_target_passed and self.config.get('cancel_on_tp_price_above_market'):
+                    should_cancel = True
+                    cancel_msg = f"Long TP Price Unfavorable (Market {current_market_price:.2f} passed TP {pending_tp:.2f})"
+                elif is_entry_unfavorable and self.config.get('cancel_on_entry_price_above_market'):
+                    should_cancel = True
+                    cancel_msg = f"Long Entry Price Unfavorable (Market {current_market_price:.2f} passed Entry {limit_price:.2f})"
 
             if should_cancel:
                 self.log(f"Cancel Order {order_id} ({cancel_msg})")

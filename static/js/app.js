@@ -445,12 +445,20 @@ function updateParametersDisplay() {
                 <span class="param-value">${currentConfig.cancel_unfilled_seconds}</span>
             </div>
            <div class="param-item">
-               <span class="param-label">Cancel if TP unfavorable:</span>
+               <span class="param-label">Short: Cancel if TP unfavorable:</span>
                <span class="param-value">${currentConfig.cancel_on_tp_price_below_market ? 'Yes' : 'No'}</span>
            </div>
            <div class="param-item">
-               <span class="param-label">Cancel if Entry unfavorable:</span>
+               <span class="param-label">Short: Cancel if Entry unfavorable:</span>
                <span class="param-value">${currentConfig.cancel_on_entry_price_below_market ? 'Yes' : 'No'}</span>
+           </div>
+           <div class="param-item">
+               <span class="param-label">Long: Cancel if TP unfavorable:</span>
+               <span class="param-value">${currentConfig.cancel_on_tp_price_above_market ? 'Yes' : 'No'}</span>
+           </div>
+           <div class="param-item">
+               <span class="param-label">Long: Cancel if Entry unfavorable:</span>
+               <span class="param-value">${currentConfig.cancel_on_entry_price_above_market ? 'Yes' : 'No'}</span>
            </div>
            <div class="param-item">
                <span class="param-label">Use Candlestick Conditions:</span>
@@ -675,6 +683,8 @@ function loadConfigToModal() {
     document.getElementById('cancelUnfilledSeconds').value = currentConfig.cancel_unfilled_seconds;
     document.getElementById('cancelOnTpPriceBelowMarket').checked = currentConfig.cancel_on_tp_price_below_market;
     document.getElementById('cancelOnEntryPriceBelowMarket').checked = currentConfig.cancel_on_entry_price_below_market;
+    document.getElementById('cancelOnTpPriceAboveMarket').checked = currentConfig.cancel_on_tp_price_above_market;
+    document.getElementById('cancelOnEntryPriceAboveMarket').checked = currentConfig.cancel_on_entry_price_above_market;
     document.getElementById('tradeFeePercentage').value = currentConfig.trade_fee_percentage || 0.07;
 
     // New fields
@@ -753,6 +763,8 @@ async function saveConfig() {
         cancel_unfilled_seconds: parseInt(document.getElementById('cancelUnfilledSeconds').value),
         cancel_on_tp_price_below_market: document.getElementById('cancelOnTpPriceBelowMarket').checked,
         cancel_on_entry_price_below_market: document.getElementById('cancelOnEntryPriceBelowMarket').checked,
+        cancel_on_tp_price_above_market: document.getElementById('cancelOnTpPriceAboveMarket').checked,
+        cancel_on_entry_price_above_market: document.getElementById('cancelOnEntryPriceAboveMarket').checked,
         trade_fee_percentage: parseFloat(document.getElementById('tradeFeePercentage').value),
 
         // New fields

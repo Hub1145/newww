@@ -23,6 +23,8 @@
   "cancel_unfilled_seconds": 90,
   "cancel_on_tp_price_below_market": true,
   "cancel_on_entry_price_below_market": true,
+  "cancel_on_tp_price_above_market": true,
+  "cancel_on_entry_price_above_market": true,
   "direction": "long",
   "mode": "isolated",
   "tp_amount": 100,
