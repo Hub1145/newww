@@ -83,20 +83,28 @@ def update_config():
         if updates_made:
             save_config(current_config)
 
-            # Ensure bot engine exists and has latest config
-            if not bot_engine:
-                bot_engine = TradingBotEngine(config_file, emit_to_client)
-            else:
-                bot_engine.config = bot_engine._load_config()
+            def background_init():
+                global bot_engine
+                # Ensure bot engine exists and has latest config
+                if not bot_engine:
+                    bot_engine = TradingBotEngine(config_file, emit_to_client)
+                else:
+                    bot_engine.config = bot_engine._load_config()
 
-            # If not trading, we still refresh credentials for background monitoring
-            if not bot_engine.is_running:
-                bot_engine.start(passive_monitoring=True)
+                # If not trading, we still refresh credentials for background monitoring
+                if not bot_engine.is_running:
+                    bot_engine.start(passive_monitoring=True)
+                else:
+                    # If already running, we might need to apply new credentials if they changed
+                    bot_engine._apply_api_credentials()
 
-            # Check if the currently selected credentials are valid
-            valid, msg = bot_engine.check_credentials()
-            if not valid:
-                return jsonify({'success': False, 'message': f'API Credentials Error: {msg}'})
+                # Check if the currently selected credentials are valid
+                valid, msg = bot_engine.check_credentials()
+                if not valid:
+                    emit_to_client('error', {'message': f'API Credentials Error: {msg}'})
+
+            import threading
+            threading.Thread(target=background_init, daemon=True).start()
             
         return jsonify({'success': True, 'message': 'Configuration updated successfully'})
 
@@ -323,26 +331,29 @@ def handle_clear_console(data=None):
 @socketio.on('batch_modify_tpsl')
 def handle_batch_modify_tpsl(data=None):
     global bot_engine
-    if bot_engine:
-        bot_engine.batch_modify_tpsl()
-    else:
-        emit('error', {'message': 'Bot is not running.'})
+    if not bot_engine:
+         bot_engine = TradingBotEngine(config_file, emit_to_client)
+         bot_engine.start(passive_monitoring=True)
+
+    bot_engine.batch_modify_tpsl()
 
 @socketio.on('batch_cancel_orders')
 def handle_batch_cancel_orders(data=None):
     global bot_engine
-    if bot_engine:
-        bot_engine.batch_cancel_orders()
-    else:
-        emit('error', {'message': 'Bot is not running.'})
+    if not bot_engine:
+         bot_engine = TradingBotEngine(config_file, emit_to_client)
+         bot_engine.start(passive_monitoring=True)
+
+    bot_engine.batch_cancel_orders()
 
 @socketio.on('emergency_sl')
 def handle_emergency_sl(data=None):
     global bot_engine
-    if bot_engine:
-        bot_engine.emergency_sl()
-    else:
-        emit('error', {'message': 'Bot is not running.'})
+    if not bot_engine:
+         bot_engine = TradingBotEngine(config_file, emit_to_client)
+         bot_engine.start(passive_monitoring=True)
+
+    bot_engine.emergency_sl()
 
 
 if __name__ == '__main__':

@@ -313,8 +313,16 @@ class TradingBotEngine:
 
         # Check if threads are already running
         if getattr(self, 'ws_thread', None) and self.ws_thread.is_alive():
-            self.log("WebSocket and Management threads are already active. Re-applied any credential changes.", level="debug")
-            return
+            # If the symbol has changed, we need to restart the WebSocket
+            if self.ws and getattr(self, 'subscribed_symbol', None) != self.config.get('symbol'):
+                 self.log(f"Symbol changed to {self.config.get('symbol')}, restarting WebSocket...", level="info")
+                 try:
+                     self.ws.close()
+                 except:
+                     pass
+            else:
+                 self.log("WebSocket and Management threads are already active. Re-applied any credential changes.", level="debug")
+                 return
 
         self.log('Bot initialized. Starting live connection threads...', 'info')
         self.stop_event.clear()
@@ -746,9 +754,10 @@ class TradingBotEngine:
         # The _send_websocket_subscriptions method will populate self.pending_subscriptions
 
     def _send_websocket_subscriptions(self):
+        self.subscribed_symbol = self.config['symbol']
         channels = [
-            {"channel": "trades", "instId": self.config['symbol']},
-            {"channel": "tickers", "instId": self.config['symbol']}, # Public tickers channel for real-time price
+            {"channel": "trades", "instId": self.subscribed_symbol},
+            {"channel": "tickers", "instId": self.subscribed_symbol}, # Public tickers channel for real-time price
         ]
         
         # Temporarily removed candle subscriptions until correct format for ETH-USDT-SWAP is confirmed
@@ -768,7 +777,7 @@ class TradingBotEngine:
 
     def _on_websocket_close(self, ws_app, close_status_code, close_msg):
         self.log("OKX WebSocket closed.", level="debug")
-        if self.is_running and not self.stop_event.is_set():
+        if not self.stop_event.is_set():
             self.log('Attempting to reconnect WebSocket...', level="debug")
             time.sleep(5)
             self.ws_thread = threading.Thread(target=self._initialize_websocket_and_start_main_loop, daemon=True)
@@ -1994,8 +2003,12 @@ class TradingBotEngine:
                      self.log(f"WARNING: Market price is STALE ({price_age:.1f}s). Re-initializing WebSocket...", level="warning")
                      # Reset update time to avoid spamming reconnects
                      self.last_price_update_time = now 
-                     # Trigger async reconnect
-                     threading.Thread(target=self._initialize_websocket, daemon=True).start()
+                     # Trigger reconnect by closing the current WebSocket
+                     if self.ws:
+                         try:
+                             self.ws.close()
+                         except:
+                             pass
                 
                 # 3. Lower Frequency: Account Info & Emitting (every ~10s)
                 if now - last_account_sync >= 10:

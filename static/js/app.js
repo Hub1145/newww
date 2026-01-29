@@ -289,10 +289,10 @@ function updateAccountMetrics(data) {
     const remainingFee = (remainingAmount * feeRate) / 100;
     const totalFee = usedFee + remainingFee;
 
-    document.getElementById('tradeFees').textContent = `$${totalFee.toFixed(2)}`;
-    document.getElementById('usedFee').textContent = `$${usedFee.toFixed(2)}`;
-    document.getElementById('remainingFee').textContent = `$${remainingFee.toFixed(2)}`;
-    document.getElementById('feeRateDisplay').textContent = `${feeRate.toFixed(3)}%`;
+    document.getElementById('tradeFees').textContent = `$${Number(totalFee).toFixed(2)}`;
+    document.getElementById('usedFee').textContent = `$${Number(usedFee).toFixed(2)}`;
+    document.getElementById('remainingFee').textContent = `$${Number(remainingFee).toFixed(2)}`;
+    document.getElementById('feeRateDisplay').textContent = `${Number(feeRate).toFixed(3)}%`;
 }
 
 function updatePositionDisplay(positionData) {
@@ -528,19 +528,19 @@ function updateOpenTrades(trades) {
             <div class="trade-details">
                 <div class="trade-detail-item">
                     <span class="trade-detail-label">Entry:</span>
-                    <span class="trade-detail-value">${trade.entry_spot_price !== null ? trade.entry_spot_price.toFixed(4) : 'N/A'}</span>
+                    <span class="trade-detail-value">${trade.entry_spot_price !== null ? Number(trade.entry_spot_price).toFixed(4) : 'N/A'}</span>
                 </div>
                 <div class="trade-detail-item">
                     <span class="param-label">Target Order:</span>
-                    <span class="param-value">$${trade.stake !== null ? trade.stake.toFixed(2) : 'N/A'}</span>
+                    <span class="param-value">$${trade.stake !== null ? Number(trade.stake).toFixed(2) : 'N/A'}</span>
                 </div>
                 <div class="trade-detail-item">
                     <span class="trade-detail-label">TP:</span>
-                    <span class="trade-detail-value text-success">${trade.tp_price !== null ? trade.tp_price.toFixed(4) : 'N/A'}</span>
+                    <span class="trade-detail-value text-success">${trade.tp_price !== null ? Number(trade.tp_price).toFixed(4) : 'N/A'}</span>
                 </div>
                 <div class="trade-detail-item">
                     <span class="trade-detail-label">SL:</span>
-                    <span class="trade-detail-value text-danger">${trade.sl_price !== null ? trade.sl_price.toFixed(4) : 'N/A'}</span>
+                    <span class="trade-detail-value text-danger">${trade.sl_price !== null ? Number(trade.sl_price).toFixed(4) : 'N/A'}</span>
                 </div>
             </div>
         </div>
