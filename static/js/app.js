@@ -140,16 +140,29 @@ async function testApiKey() {
     testBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Testing...'; // Show loading spinner
 
     const useTestnet = document.getElementById('useTestnet').checked;
+    const useDev = document.getElementById('useDeveloperApi').checked;
     let apiKey, apiSecret, passphrase;
 
-    if (useTestnet) {
-        apiKey = document.getElementById('okxDemoApiKey').value;
-        apiSecret = document.getElementById('okxDemoApiSecret').value;
-        passphrase = document.getElementById('okxDemoApiPassphrase').value;
+    if (useDev) {
+        if (useTestnet) {
+            apiKey = document.getElementById('devDemoApiKey').value;
+            apiSecret = document.getElementById('devDemoApiSecret').value;
+            passphrase = document.getElementById('devDemoApiPassphrase').value;
+        } else {
+            apiKey = document.getElementById('devApiKey').value;
+            apiSecret = document.getElementById('devApiSecret').value;
+            passphrase = document.getElementById('devPassphrase').value;
+        }
     } else {
-        apiKey = document.getElementById('okxApiKey').value;
-        apiSecret = document.getElementById('okxApiSecret').value;
-        passphrase = document.getElementById('okxPassphrase').value;
+        if (useTestnet) {
+            apiKey = document.getElementById('okxDemoApiKey').value;
+            apiSecret = document.getElementById('okxDemoApiSecret').value;
+            passphrase = document.getElementById('okxDemoApiPassphrase').value;
+        } else {
+            apiKey = document.getElementById('okxApiKey').value;
+            apiSecret = document.getElementById('okxApiSecret').value;
+            passphrase = document.getElementById('okxPassphrase').value;
+        }
     }
 
     try {
@@ -219,6 +232,9 @@ function setupSocketListeners() {
 
     socket.on('error', (data) => {
         showNotification(data.message, 'error');
+        // Re-enable start/stop button if it was disabled during an attempt
+        const btn = document.getElementById('startStopBtn');
+        if (btn) btn.disabled = false;
     });
 
     socket.on('connect', () => {
@@ -255,13 +271,13 @@ function updateBotStatus(running) {
 }
 
 function updateAccountMetrics(data) {
-    document.getElementById('totalCapital').textContent = `$${data.total_capital !== undefined ? data.total_capital.toFixed(2) : '0.00'}`;
-    document.getElementById('maxAllowedUsedDisplay').textContent = `$${data.max_allowed_used_display !== undefined ? data.max_allowed_used_display.toFixed(2) : '0.00'}`;
-    document.getElementById('maxAmountDisplay').textContent = `$${data.max_amount_display !== undefined ? data.max_amount_display.toFixed(2) : '0.00'}`;
-    document.getElementById('usedAmount').textContent = `$${data.used_amount !== undefined ? data.used_amount.toFixed(2) : '0.00'}`;
-    document.getElementById('remainingAmount').textContent = `$${data.remaining_amount !== undefined ? data.remaining_amount.toFixed(2) : '0.00'}`;
-    document.getElementById('balance').textContent = `$${data.total_balance !== undefined ? data.total_balance.toFixed(2) : '0.00'}`;
-    document.getElementById('netProfit').textContent = `$${data.net_profit !== undefined ? data.net_profit.toFixed(2) : '0.00'}`;
+    document.getElementById('totalCapital').textContent = `$${data.total_capital !== undefined ? Number(data.total_capital).toFixed(2) : '0.00'}`;
+    document.getElementById('maxAllowedUsedDisplay').textContent = `$${data.max_allowed_used_display !== undefined ? Number(data.max_allowed_used_display).toFixed(2) : '0.00'}`;
+    document.getElementById('maxAmountDisplay').textContent = `$${data.max_amount_display !== undefined ? Number(data.max_amount_display).toFixed(2) : '0.00'}`;
+    document.getElementById('usedAmount').textContent = `$${data.used_amount !== undefined ? Number(data.used_amount).toFixed(2) : '0.00'}`;
+    document.getElementById('remainingAmount').textContent = `$${data.remaining_amount !== undefined ? Number(data.remaining_amount).toFixed(2) : '0.00'}`;
+    document.getElementById('balance').textContent = `$${data.total_balance !== undefined ? Number(data.total_balance).toFixed(2) : '0.00'}`;
+    document.getElementById('netProfit').textContent = `$${data.net_profit !== undefined ? Number(data.net_profit).toFixed(2) : '0.00'}`;
     document.getElementById('totalTrades').textContent = data.total_trades !== undefined ? data.total_trades : '0';
 
     // Calculate fee breakdown based on user's formula
@@ -273,10 +289,10 @@ function updateAccountMetrics(data) {
     const remainingFee = (remainingAmount * feeRate) / 100;
     const totalFee = usedFee + remainingFee;
 
-    document.getElementById('tradeFees').textContent = `$${totalFee.toFixed(2)}`;
-    document.getElementById('usedFee').textContent = `$${usedFee.toFixed(2)}`;
-    document.getElementById('remainingFee').textContent = `$${remainingFee.toFixed(2)}`;
-    document.getElementById('feeRateDisplay').textContent = `${feeRate.toFixed(3)}%`;
+    document.getElementById('tradeFees').textContent = `$${Number(totalFee).toFixed(2)}`;
+    document.getElementById('usedFee').textContent = `$${Number(usedFee).toFixed(2)}`;
+    document.getElementById('remainingFee').textContent = `$${Number(remainingFee).toFixed(2)}`;
+    document.getElementById('feeRateDisplay').textContent = `${Number(feeRate).toFixed(3)}%`;
 }
 
 function updatePositionDisplay(positionData) {
@@ -317,13 +333,13 @@ function updatePositionDisplay(positionData) {
                 </div>
                 <div class="row g-0">
                     <div class="col-6 small text-muted">Entry Price:</div>
-                    <div class="col-6 small text-end">${pos.price.toFixed(4)}</div>
+                    <div class="col-6 small text-end">${Number(pos.price || 0).toFixed(4)}</div>
                     <div class="col-6 small text-muted">Quantity:</div>
-                    <div class="col-6 small text-end">${pos.qty.toFixed(4)}</div>
+                    <div class="col-6 small text-end">${Number(pos.qty || 0).toFixed(4)}</div>
                     <div class="col-6 small text-muted">Current TP:</div>
-                    <div class="col-6 small text-end text-success">${(pos.tp || positionData.current_take_profit || 0).toFixed(4)}</div>
+                    <div class="col-6 small text-end text-success">${Number(pos.tp || (positionData && positionData.current_take_profit) || 0).toFixed(4)}</div>
                     <div class="col-6 small text-muted">Current SL:</div>
-                    <div class="col-6 small text-end text-danger">${(pos.sl || positionData.current_stop_loss || 0).toFixed(4)}</div>
+                    <div class="col-6 small text-end text-danger">${Number(pos.sl || (positionData && positionData.current_stop_loss) || 0).toFixed(4)}</div>
                 </div>
             </div>
         `;
@@ -429,12 +445,20 @@ function updateParametersDisplay() {
                 <span class="param-value">${currentConfig.cancel_unfilled_seconds}</span>
             </div>
            <div class="param-item">
-               <span class="param-label">Cancel if TP unfavorable:</span>
+               <span class="param-label">Short: Cancel if TP unfavorable:</span>
                <span class="param-value">${currentConfig.cancel_on_tp_price_below_market ? 'Yes' : 'No'}</span>
            </div>
            <div class="param-item">
-               <span class="param-label">Cancel if Entry unfavorable:</span>
+               <span class="param-label">Short: Cancel if Entry unfavorable:</span>
                <span class="param-value">${currentConfig.cancel_on_entry_price_below_market ? 'Yes' : 'No'}</span>
+           </div>
+           <div class="param-item">
+               <span class="param-label">Long: Cancel if TP unfavorable:</span>
+               <span class="param-value">${currentConfig.cancel_on_tp_price_above_market ? 'Yes' : 'No'}</span>
+           </div>
+           <div class="param-item">
+               <span class="param-label">Long: Cancel if Entry unfavorable:</span>
+               <span class="param-value">${currentConfig.cancel_on_entry_price_above_market ? 'Yes' : 'No'}</span>
            </div>
            <div class="param-item">
                <span class="param-label">Use Candlestick Conditions:</span>
@@ -512,19 +536,19 @@ function updateOpenTrades(trades) {
             <div class="trade-details">
                 <div class="trade-detail-item">
                     <span class="trade-detail-label">Entry:</span>
-                    <span class="trade-detail-value">${trade.entry_spot_price !== null ? trade.entry_spot_price.toFixed(4) : 'N/A'}</span>
+                    <span class="trade-detail-value">${trade.entry_spot_price !== null ? Number(trade.entry_spot_price).toFixed(4) : 'N/A'}</span>
                 </div>
                 <div class="trade-detail-item">
                     <span class="param-label">Target Order:</span>
-                    <span class="param-value">$${trade.stake !== null ? trade.stake.toFixed(2) : 'N/A'}</span>
+                    <span class="param-value">$${trade.stake !== null ? Number(trade.stake).toFixed(2) : 'N/A'}</span>
                 </div>
                 <div class="trade-detail-item">
                     <span class="trade-detail-label">TP:</span>
-                    <span class="trade-detail-value text-success">${trade.tp_price !== null ? trade.tp_price.toFixed(4) : 'N/A'}</span>
+                    <span class="trade-detail-value text-success">${trade.tp_price !== null ? Number(trade.tp_price).toFixed(4) : 'N/A'}</span>
                 </div>
                 <div class="trade-detail-item">
                     <span class="trade-detail-label">SL:</span>
-                    <span class="trade-detail-value text-danger">${trade.sl_price !== null ? trade.sl_price.toFixed(4) : 'N/A'}</span>
+                    <span class="trade-detail-value text-danger">${trade.sl_price !== null ? Number(trade.sl_price).toFixed(4) : 'N/A'}</span>
                 </div>
             </div>
         </div>
@@ -634,7 +658,14 @@ function loadConfigToModal() {
     document.getElementById('okxDemoApiKey').value = currentConfig.okx_demo_api_key;
     document.getElementById('okxDemoApiSecret').value = currentConfig.okx_demo_api_secret;
     document.getElementById('okxDemoApiPassphrase').value = currentConfig.okx_demo_api_passphrase;
+    document.getElementById('devApiKey').value = currentConfig.dev_api_key;
+    document.getElementById('devApiSecret').value = currentConfig.dev_api_secret;
+    document.getElementById('devPassphrase').value = currentConfig.dev_passphrase;
+    document.getElementById('devDemoApiKey').value = currentConfig.dev_demo_api_key;
+    document.getElementById('devDemoApiSecret').value = currentConfig.dev_demo_api_secret;
+    document.getElementById('devDemoApiPassphrase').value = currentConfig.dev_demo_api_passphrase;
     document.getElementById('useTestnet').checked = currentConfig.use_testnet;
+    document.getElementById('useDeveloperApi').checked = currentConfig.use_developer_api;
     document.getElementById('symbol').value = currentConfig.symbol;
     document.getElementById('shortSafetyLinePrice').value = currentConfig.short_safety_line_price;
     document.getElementById('longSafetyLinePrice').value = currentConfig.long_safety_line_price;
@@ -652,6 +683,8 @@ function loadConfigToModal() {
     document.getElementById('cancelUnfilledSeconds').value = currentConfig.cancel_unfilled_seconds;
     document.getElementById('cancelOnTpPriceBelowMarket').checked = currentConfig.cancel_on_tp_price_below_market;
     document.getElementById('cancelOnEntryPriceBelowMarket').checked = currentConfig.cancel_on_entry_price_below_market;
+    document.getElementById('cancelOnTpPriceAboveMarket').checked = currentConfig.cancel_on_tp_price_above_market;
+    document.getElementById('cancelOnEntryPriceAboveMarket').checked = currentConfig.cancel_on_entry_price_above_market;
     document.getElementById('tradeFeePercentage').value = currentConfig.trade_fee_percentage || 0.07;
 
     // New fields
@@ -705,6 +738,13 @@ async function saveConfig() {
         okx_demo_api_key: document.getElementById('okxDemoApiKey').value,
         okx_demo_api_secret: document.getElementById('okxDemoApiSecret').value,
         okx_demo_api_passphrase: document.getElementById('okxDemoApiPassphrase').value,
+        dev_api_key: document.getElementById('devApiKey').value,
+        dev_api_secret: document.getElementById('devApiSecret').value,
+        dev_passphrase: document.getElementById('devPassphrase').value,
+        dev_demo_api_key: document.getElementById('devDemoApiKey').value,
+        dev_demo_api_secret: document.getElementById('devDemoApiSecret').value,
+        dev_demo_api_passphrase: document.getElementById('devDemoApiPassphrase').value,
+        use_developer_api: document.getElementById('useDeveloperApi').checked,
         use_testnet: document.getElementById('useTestnet').checked,
         symbol: document.getElementById('symbol').value,
         short_safety_line_price: parseFloat(document.getElementById('shortSafetyLinePrice').value),
@@ -723,6 +763,8 @@ async function saveConfig() {
         cancel_unfilled_seconds: parseInt(document.getElementById('cancelUnfilledSeconds').value),
         cancel_on_tp_price_below_market: document.getElementById('cancelOnTpPriceBelowMarket').checked,
         cancel_on_entry_price_below_market: document.getElementById('cancelOnEntryPriceBelowMarket').checked,
+        cancel_on_tp_price_above_market: document.getElementById('cancelOnTpPriceAboveMarket').checked,
+        cancel_on_entry_price_above_market: document.getElementById('cancelOnEntryPriceAboveMarket').checked,
         trade_fee_percentage: parseFloat(document.getElementById('tradeFeePercentage').value),
 
         // New fields
@@ -767,7 +809,7 @@ async function saveConfig() {
         if (result.success) {
             currentConfig = newConfig;
             configModal.hide();
-            showNotification('Configuration saved successfully', 'success');
+            showNotification(result.message || 'Configuration saved successfully', 'success');
             updateParametersDisplay(); // Refresh the parameters display
         } else {
             showNotification(result.message, 'error');

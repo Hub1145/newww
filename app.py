@@ -52,12 +52,15 @@ def update_config():
 
         # Whitelist of all valid parameters
         allowed_params = [
-            'okx_api_key', 'okx_api_secret', 'okx_passphrase', 'okx_demo_api_key', 'okx_demo_api_secret', 'okx_demo_api_passphrase', 'use_testnet', 'symbol',
+            'okx_api_key', 'okx_api_secret', 'okx_passphrase', 'okx_demo_api_key', 'okx_demo_api_secret', 'okx_demo_api_passphrase',
+            'dev_api_key', 'dev_api_secret', 'dev_passphrase', 'dev_demo_api_key', 'dev_demo_api_secret', 'dev_demo_api_passphrase',
+            'use_developer_api', 'use_testnet', 'symbol',
             'short_safety_line_price', 'long_safety_line_price', 'leverage', 'max_allowed_used',
             'entry_price_offset', 'batch_offset', 'tp_price_offset', 'sl_price_offset',
             'loop_time_seconds', 'rate_divisor', 'batch_size_per_loop', 'min_order_amount',
             'target_order_amount', 'cancel_unfilled_seconds', 'cancel_on_tp_price_below_market',
-            'cancel_on_entry_price_below_market', 'direction', 'mode', 'tp_amount', 'sl_amount',
+            'cancel_on_entry_price_below_market', 'cancel_on_tp_price_above_market',
+            'cancel_on_entry_price_above_market', 'direction', 'mode', 'tp_amount', 'sl_amount',
             'trigger_price', 'tp_mode', 'tp_type', 'use_chg_open_close', 'min_chg_open_close',
             'max_chg_open_close', 'use_chg_high_low', 'min_chg_high_low', 'max_chg_high_low',
             'use_chg_high_close', 'min_chg_high_close', 'max_chg_high_close', 'candlestick_timeframe',
@@ -81,9 +84,28 @@ def update_config():
         if updates_made:
             save_config(current_config)
 
-            # If bot is not running, reload its config immediately if instance exists
-            if bot_engine and not bot_engine.is_running:
-                bot_engine.config = bot_engine._load_config()
+            def background_init():
+                global bot_engine
+                # Ensure bot engine exists and has latest config
+                if not bot_engine:
+                    bot_engine = TradingBotEngine(config_file, emit_to_client)
+                else:
+                    bot_engine.config = bot_engine._load_config()
+
+                # If not trading, we still refresh credentials for background monitoring
+                if not bot_engine.is_running:
+                    bot_engine.start(passive_monitoring=True)
+                else:
+                    # If already running, we might need to apply new credentials if they changed
+                    bot_engine._apply_api_credentials()
+
+                # Check if the currently selected credentials are valid
+                valid, msg = bot_engine.check_credentials()
+                if not valid:
+                    emit_to_client('error', {'message': f'API Credentials Error: {msg}'})
+
+            import threading
+            threading.Thread(target=background_init, daemon=True).start()
             
         return jsonify({'success': True, 'message': 'Configuration updated successfully'})
 
@@ -137,6 +159,8 @@ def get_status():
     if not bot_engine:
         try:
             bot_engine = TradingBotEngine(config_file, emit_to_client)
+            # Start background monitoring automatically
+            bot_engine.start(passive_monitoring=True)
         except Exception as e:
             logging.error(f"Error initializing bot engine for status: {e}")
             return jsonify({'running': False, 'error': str(e)}), 500
@@ -160,7 +184,7 @@ def get_status():
         'net_profit': bot_engine.net_profit,
         'total_trades': total_active_trades_count,
         'trade_fees': bot_engine.trade_fees,
-        'total_capital': bot_engine.initial_total_capital,
+        'total_capital': bot_engine.total_equity,
         'used_amount': bot_engine.used_amount_notional,
         'remaining_amount': bot_engine.remaining_amount_notional,
         'max_allowed_used_display': bot_engine.max_allowed_display,
@@ -188,9 +212,17 @@ def get_status():
  
 @socketio.on('connect')
 def handle_connect(sid):
+    global bot_engine
     logging.info(f'Client connected: {sid}')
     emit('connection_status', {'connected': True}, room=sid)
  
+    if not bot_engine:
+        try:
+            bot_engine = TradingBotEngine(config_file, emit_to_client)
+            bot_engine.start(passive_monitoring=True)
+        except Exception as e:
+            logging.error(f"Error auto-initializing bot engine on connect: {e}")
+
     if bot_engine:
         emit('bot_status', {'running': bot_engine.is_running}, room=sid)
         # Emit current account info
@@ -217,7 +249,7 @@ def handle_connect(sid):
             remaining_amount_notional = max_notional_capacity - used_amount_notional
 
         emit('account_update', {
-            'total_capital': bot_engine.initial_total_capital or total_balance,
+            'total_capital': bot_engine.total_equity or total_balance,
             'max_allowed_used_display': max_allowed_margin, # Unleveraged
             'max_amount_display': max_amount_display,       # Unleveraged
             'used_amount': used_amount_notional,            # Leveraged
@@ -248,17 +280,22 @@ def handle_disconnect():
 @socketio.on('start_bot')
 def handle_start_bot(data=None):
     global bot_engine
-    print("--- DEBUG: handle_start_bot called ---", flush=True)
 
     try:
-        config = load_config() # This is line 111
-
         if bot_engine and bot_engine.is_running:
             emit('error', {'message': 'Bot is already running'})
             return
 
+        if not bot_engine:
+             bot_engine = TradingBotEngine(config_file, emit_to_client)
+
+        # 1. Check Credentials before starting
+        valid, msg = bot_engine.check_credentials()
+        if not valid:
+            emit('error', {'message': f'API Credentials Error: {msg}'})
+            return
+
         try:
-            bot_engine = TradingBotEngine(config_file, emit_to_client) # Pass config_file
             bot_engine.start()
             emit('bot_status', {'running': True}) # Explicitly emit status after starting
             emit('success', {'message': 'Bot started successfully'})
@@ -295,26 +332,29 @@ def handle_clear_console(data=None):
 @socketio.on('batch_modify_tpsl')
 def handle_batch_modify_tpsl(data=None):
     global bot_engine
-    if bot_engine:
-        bot_engine.batch_modify_tpsl()
-    else:
-        emit('error', {'message': 'Bot is not running.'})
+    if not bot_engine:
+         bot_engine = TradingBotEngine(config_file, emit_to_client)
+         bot_engine.start(passive_monitoring=True)
+
+    bot_engine.batch_modify_tpsl()
 
 @socketio.on('batch_cancel_orders')
 def handle_batch_cancel_orders(data=None):
     global bot_engine
-    if bot_engine:
-        bot_engine.batch_cancel_orders()
-    else:
-        emit('error', {'message': 'Bot is not running.'})
+    if not bot_engine:
+         bot_engine = TradingBotEngine(config_file, emit_to_client)
+         bot_engine.start(passive_monitoring=True)
+
+    bot_engine.batch_cancel_orders()
 
 @socketio.on('emergency_sl')
 def handle_emergency_sl(data=None):
     global bot_engine
-    if bot_engine:
-        bot_engine.emergency_sl()
-    else:
-        emit('error', {'message': 'Bot is not running.'})
+    if not bot_engine:
+         bot_engine = TradingBotEngine(config_file, emit_to_client)
+         bot_engine.start(passive_monitoring=True)
+
+    bot_engine.emergency_sl()
 
 
 if __name__ == '__main__':

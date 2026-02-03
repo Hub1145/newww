@@ -106,18 +106,7 @@ class TradingBotEngine:
             file_handler.setLevel(logging.DEBUG) # File gets DEBUG and higher
             root_logger.addHandler(file_handler)
 
-        # Initialize OKX API credentials globally
-        global okx_api_key, okx_api_secret, okx_passphrase, okx_simulated_trading_header
-        if self.config['use_testnet']:
-            okx_api_key = self.config['okx_demo_api_key']
-            okx_api_secret = self.config['okx_demo_api_secret']
-            okx_passphrase = self.config['okx_demo_api_passphrase']
-            okx_simulated_trading_header = {'x-simulated-trading': '1'}
-        else:
-            okx_api_key = self.config['okx_api_key']
-            okx_api_secret = self.config['okx_api_secret']
-            okx_passphrase = self.config['okx_passphrase']
-            okx_simulated_trading_header = {}
+        self._apply_api_credentials()
 
         self.ws = None
         self.ws_thread = None
@@ -138,6 +127,7 @@ class TradingBotEngine:
         self.last_price_update_time = time.time() # High-precision timestamp of last price arrival
         self.account_balance = 0.0
         self.available_balance = 0.0
+        self.total_equity = 0.0
         self.initial_total_capital = 0.0 # Session-based, in-memory only
         self.account_info_lock = threading.Lock()
         self.net_profit = 0.0 # Track actual PnL
@@ -179,6 +169,7 @@ class TradingBotEngine:
         
         self.total_trades_count = 0 # Persistent counter for individual fills
         self.confirmed_subscriptions = set()
+        self.credentials_invalid = False
 
         self.intervals = {
             '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
@@ -205,6 +196,10 @@ class TradingBotEngine:
         if current_level < configured_level:
             return
 
+        # Suppress non-critical logs if credentials are known to be invalid
+        if self.credentials_invalid and level.lower() != 'critical':
+            return
+
         timestamp = datetime.now().strftime('%H:%M:%S')
         log_entry = {'timestamp': timestamp, 'message': message, 'level': level}
         
@@ -226,80 +221,168 @@ class TradingBotEngine:
         elif level == 'critical':
             logging.critical(message)
     
-    def start(self):
-        if self.is_running:
-            self.log('Bot is already running', 'warning')
+    def check_credentials(self):
+        """Verifies if the current API credentials are valid and configured."""
+        self._apply_api_credentials()
+
+        global okx_api_key, okx_api_secret, okx_passphrase
+        if not okx_api_key or not okx_api_secret or not okx_passphrase:
+            return False, "API Key, Secret, or Passphrase missing for selected mode."
+
+        try:
+            path = "/api/v5/account/balance"
+            params = {"ccy": "USDT"}
+            # Use max_retries=1 to fail quickly if invalid
+            response = self._okx_request("GET", path, params=params, max_retries=1)
+
+            if response and response.get('code') == '0':
+                return True, "Credentials valid."
+            elif response and response.get('code') == '50110': # Invalid API key
+                return False, "Invalid API credentials."
+            elif response and response.get('msg'):
+                return False, f"API Error: {response.get('msg')}"
+            else:
+                return False, "Unknown API error during validation."
+        except Exception as e:
+            return False, f"Connection error: {str(e)}"
+
+    def start(self, passive_monitoring=False):
+        if self.is_running and not passive_monitoring:
+            self.log('Bot is already trading', 'warning')
             return
         
-        self.is_running = True
-        self.log('Bot starting...', 'info')
-        
+        if not passive_monitoring:
+            self.is_running = True
+            self.log('Bot starting trading logic...', 'info')
+        else:
+            self.log('Bot starting background monitoring...', 'info')
+
+        # 0. Apply Credentials
+        self._apply_api_credentials()
+
+        # 0.1 Perform initial credential validity check
+        # Validation: check if credentials are provided first
+        global okx_api_key, okx_api_secret, okx_passphrase
+        if not okx_api_key or not okx_api_secret or not okx_passphrase:
+            self.log("⚠️ API Credentials not configured for the selected mode.", "error")
+            self.credentials_invalid = True
+            if not passive_monitoring:
+                self.emit('error', {'message': 'API Credentials not configured.'})
+                self.is_running = False
+            return
+
+        self.log("Verifying API credentials...", level="debug")
+        valid, msg = self.check_credentials()
+        if not valid:
+            # We only set credentials_invalid if it was an auth error (handled in _okx_request)
+            # or if it's explicitly an auth-related message
+            if any(err in msg.lower() for err in ['invalid', 'credentials', 'key', 'secret', 'passphrase', '401']):
+                self.credentials_invalid = True
+
+            if not self.credentials_invalid:
+                 # If it's a network error, we don't set credentials_invalid,
+                 # but we might still want to stop the bot from starting if not passive
+                 self.log(f"⚠️ API Connection/Verification Failed: {msg}", "error")
+            else:
+                 self.log(f"⚠️ API Credentials Verification Failed: {msg}", "error")
+
+            if not passive_monitoring:
+                self.emit('error', {'message': f'API Credentials Error: {msg}'})
+                self.is_running = False
+            return
+
         # New initialization sequence for OKX
         if not get_okx_server_time_and_offset(self.log):
             self.log("Failed to synchronize server time. Please check network connection or API.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
         
         if not self._fetch_product_info(self.config['symbol']):
             self.log("Failed to fetch product info. Exiting.", 'error')
-            self.is_running = False
+            if not passive_monitoring:
+                self.is_running = False
             self.emit('bot_status', {'running': False})
             return
  
-        # 1. Position Mode Sync (Must happen BEFORE leverage)
-        target_pos_mode = self.config.get('okx_pos_mode', 'net_mode')
-        if not self._okx_set_position_mode(target_pos_mode):
-             self.log("Failed to verify/set position mode. Exiting.", 'error')
-             self.is_running = False
-             self.emit('bot_status', {'running': False})
-             return
+        if not passive_monitoring:
+            # 1. Position Mode Sync (Must happen BEFORE leverage)
+            target_pos_mode = self.config.get('okx_pos_mode', 'net_mode')
+            if not self._okx_set_position_mode(target_pos_mode):
+                 self.log("Failed to verify/set position mode. Exiting.", 'error')
+                 self.is_running = False
+                 self.emit('bot_status', {'running': False})
+                 return
 
-        # 2. Leverage Sync (Requires posSide in Hedge Mode)
-        lev_val = self.config.get('leverage', 20)
-        symbol = self.config['symbol']
-        lev_success = False
+            # 2. Leverage Sync (Requires posSide in Hedge Mode)
+            lev_val = self.config.get('leverage', 20)
+            symbol = self.config['symbol']
+            lev_success = False
+
+            if target_pos_mode == 'long_short_mode':
+                # Set for both sides in hedge mode
+                l_ok = self._okx_set_leverage(symbol, lev_val, pos_side="long")
+                s_ok = self._okx_set_leverage(symbol, lev_val, pos_side="short")
+                lev_success = l_ok and s_ok
+            else:
+                # Set for net side in one-way mode
+                lev_success = self._okx_set_leverage(symbol, lev_val, pos_side="net")
+
+            if not lev_success:
+                self.log("Failed to set leverage. Exiting.", 'error')
+                self.is_running = False
+                self.emit('bot_status', {'running': False})
+                return
         
-        if target_pos_mode == 'long_short_mode':
-            # Set for both sides in hedge mode
-            l_ok = self._okx_set_leverage(symbol, lev_val, pos_side="long")
-            s_ok = self._okx_set_leverage(symbol, lev_val, pos_side="short")
-            lev_success = l_ok and s_ok
-        else:
-            # Set for net side in one-way mode
-            lev_success = self._okx_set_leverage(symbol, lev_val, pos_side="net")
+            self.log("Checking for and closing any existing open positions...", level="info")
+            self._check_and_close_any_open_position()
 
-        if not lev_success:
-            self.log("Failed to set leverage. Exiting.", 'error')
-            self.is_running = False
-            self.emit('bot_status', {'running': False})
-            return
-        
-        self.log("Checking for and closing any existing open positions...", level="info")
-        self._check_and_close_any_open_position()
+        # Check if threads are already running
+        if getattr(self, 'ws_thread', None) and self.ws_thread.is_alive():
+            # If the symbol has changed, we need to restart the WebSocket
+            if self.ws and getattr(self, 'subscribed_symbol', None) != self.config.get('symbol'):
+                 self.log(f"Symbol changed to {self.config.get('symbol')}, restarting WebSocket...", level="info")
+                 try:
+                     self.ws.close()
+                 except:
+                     pass
+            else:
+                 self.log("WebSocket and Management threads are already active. Re-applied any credential changes.", level="debug")
+                 return
 
-        self.log('Bot initialized. Starting live trading connection...', 'info')
+        self.log('Bot initialized. Starting live connection threads...', 'info')
         self.stop_event.clear()
         self.ws_thread = threading.Thread(target=self._initialize_websocket_and_start_main_loop, daemon=True)
         self.ws_thread.start()
 
         # Start unified management thread (Account Info + Cancellation)
-        self.mgmt_thread = threading.Thread(target=self._unified_management_loop, daemon=True)
-        self.mgmt_thread.start()
+        # Note: In the previous code, this was started in start(), but it should be part of the thread group
+        if not getattr(self, 'mgmt_thread', None) or not self.mgmt_thread.is_alive():
+            self.mgmt_thread = threading.Thread(target=self._unified_management_loop, daemon=True)
+            self.mgmt_thread.start()
     
     def stop(self):
         if not self.is_running:
-            self.log('Bot is not running', 'warning')
+            self.log('Bot trading is not active', 'warning')
             return
         
         self.is_running = False
-        self.log('Bot stopping...', 'info')
+        self.log('Bot trading logic paused. Background monitoring remains active.', 'info')
         
-        self.stop_event.set() # Signal all threads to stop
-        if self.ws:
-            self.ws.close()
-        
+        # We no longer set stop_event or close WS here to allow background Auto-Exit to work
         self.emit('bot_status', {'running': False})
+
+    def shutdown(self):
+        """Truly stops all threads and connections."""
+        self.is_running = False
+        self.stop_event.set()
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+        self.log('Bot fully shut down.', 'info')
     
     def _load_config(self):
         try:
@@ -309,6 +392,8 @@ class TradingBotEngine:
                 config.setdefault('max_allowed_used', 1000.0)
                 config.setdefault('cancel_on_tp_price_below_market', True)
                 config.setdefault('cancel_on_entry_price_below_market', True)
+                config.setdefault('cancel_on_tp_price_above_market', True)
+                config.setdefault('cancel_on_entry_price_above_market', True)
                 config.setdefault('websocket_timeframes', ['1m', '5m']) # Add default for websocket_timeframes
                 config.setdefault('direction', 'long')
                 config.setdefault('mode', 'cross') # Changed default mode to 'cross'
@@ -348,6 +433,38 @@ class TradingBotEngine:
     # OKX API Helper Functions (Adapted as methods)
     # ================================================================================
 
+    def _apply_api_credentials(self):
+        """Applies configured API credentials to global variables used by requests."""
+        global okx_api_key, okx_api_secret, okx_passphrase, okx_simulated_trading_header
+        self.credentials_invalid = False
+        use_dev = self.config.get('use_developer_api', False)
+        use_demo = self.config.get('use_testnet', False)
+
+        if use_dev:
+            if use_demo:
+                okx_api_key = self.config.get('dev_demo_api_key', '')
+                okx_api_secret = self.config.get('dev_demo_api_secret', '')
+                okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('dev_api_key', '')
+                okx_api_secret = self.config.get('dev_api_secret', '')
+                okx_passphrase = self.config.get('dev_passphrase', '')
+        else:
+            if use_demo:
+                okx_api_key = self.config.get('okx_demo_api_key', '')
+                okx_api_secret = self.config.get('okx_demo_api_secret', '')
+                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+            else:
+                okx_api_key = self.config.get('okx_api_key', '')
+                okx_api_secret = self.config.get('okx_api_secret', '')
+                okx_passphrase = self.config.get('okx_passphrase', '')
+
+        if use_demo:
+            okx_simulated_trading_header = {'x-simulated-trading': '1'}
+        else:
+            okx_simulated_trading_header = {}
+        self.log(f"API Credentials Applied: {'Developer' if use_dev else 'User'} | {'Demo' if use_demo else 'Live'}", level="debug")
+
     def _save_config(self):
         try:
             with open(self.config_path, 'w') as f:
@@ -357,6 +474,9 @@ class TradingBotEngine:
             self.log(f"Error saving config: {e}", level="error")
 
     def _okx_request(self, method, path, params=None, body_dict=None, max_retries=3):
+        if self.credentials_invalid:
+            return None
+
         local_dt = datetime.now(timezone.utc)
         adjusted_dt = local_dt + timedelta(milliseconds=server_time_offset)
         timestamp = adjusted_dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
@@ -386,6 +506,9 @@ class TradingBotEngine:
         headers.update(okx_simulated_trading_header)
 
         for attempt in range(max_retries):
+            if self.credentials_invalid:
+                return None
+
             try:
                 req_func = getattr(requests, method.lower(), None)
                 if not req_func:
@@ -403,12 +526,23 @@ class TradingBotEngine:
                 if response.status_code != 200:
                     try:
                         error_json = response.json()
-                        self.log(f"API Error: Status={response.status_code}, Code={error_json.get('code')}, Msg={error_json.get('msg')}. Full Response: {error_json}", level="error")
                         okx_error_code = error_json.get('code')
+
+                        # Check for invalid credential error codes
+                        if okx_error_code in ['50110', '50111', '50113'] or response.status_code == 401:
+                            if not self.credentials_invalid:
+                                self.log(f"CRITICAL: Invalid API credentials detected (Status={response.status_code}, Code={okx_error_code}). Suppressing further API errors.", level="critical")
+                                self.credentials_invalid = True
+                            return error_json
+
+                        if not self.credentials_invalid:
+                            self.log(f"API Error: Status={response.status_code}, Code={okx_error_code}, Msg={error_json.get('msg')}. Full Response: {error_json}", level="error")
+
                         if okx_error_code:
                             return error_json
                     except json.JSONDecodeError:
-                        self.log(f"API Error: Status={response.status_code}, Response: {response.text}", level="error")
+                        if not self.credentials_invalid:
+                            self.log(f"API Error: Status={response.status_code}, Response: {response.text}", level="error")
 
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
@@ -667,9 +801,10 @@ class TradingBotEngine:
         # The _send_websocket_subscriptions method will populate self.pending_subscriptions
 
     def _send_websocket_subscriptions(self):
+        self.subscribed_symbol = self.config['symbol']
         channels = [
-            {"channel": "trades", "instId": self.config['symbol']},
-            {"channel": "tickers", "instId": self.config['symbol']}, # Public tickers channel for real-time price
+            {"channel": "trades", "instId": self.subscribed_symbol},
+            {"channel": "tickers", "instId": self.subscribed_symbol}, # Public tickers channel for real-time price
         ]
         
         # Temporarily removed candle subscriptions until correct format for ETH-USDT-SWAP is confirmed
@@ -689,7 +824,7 @@ class TradingBotEngine:
 
     def _on_websocket_close(self, ws_app, close_status_code, close_msg):
         self.log("OKX WebSocket closed.", level="debug")
-        if self.is_running and not self.stop_event.is_set():
+        if not self.stop_event.is_set():
             self.log('Attempting to reconnect WebSocket...', level="debug")
             time.sleep(5)
             self.ws_thread = threading.Thread(target=self._initialize_websocket_and_start_main_loop, daemon=True)
@@ -1423,21 +1558,6 @@ class TradingBotEngine:
             self.entry_order_with_sl = None
         self.log(f"Entry state reset. Reason: {reason}", level="info")
 
-    def _cancel_all_exit_orders_and_reset(self, reason):
-        with self.position_lock:
-            orders_to_cancel = list(self.position_exit_orders.values())
-
-            self.in_position = False
-            self.position_entry_price = 0.0
-            self.position_qty = 0.0
-            self.current_take_profit = 0.0
-            self.current_stop_loss = 0.0
-            self.position_exit_orders = {}
-            self.pending_entry_order_id = None
-            self.entry_reduced_tp_flag = False
-
-        with self.entry_order_sl_lock:
-            self.entry_order_with_sl = None
 
         self.log("=" * 80, level="info")
         self.log(f"POSITION CLOSED - Reason: {reason}", level="info")
@@ -1840,100 +1960,54 @@ class TradingBotEngine:
                              del self.pending_entry_order_details[order_id]
                 continue
 
-            # 2. TP Check
-            # We need to calculate pending TP
+            # 2. TP Check (Missed Opportunity)
             tp_offset = self.config.get('tp_price_offset', 0)
-            if signal == 1: # Long
-                 pending_tp = limit_price + tp_offset
-                 # "TP < Market" for Long? (Entry+Offset < Market). Price rose above TP.
-                 # User Log says "TP<Market".
-                 # If this condition is "TP < Market".
-                 cond_tp = pending_tp < current_market_price
-            else: # Short
-                 pending_tp = limit_price - tp_offset
-                 # User Log says "TP<Market". (Entry-Offset < Market).
-                 # This is normally TRUE for Short.
-                 # If user meant "Market < TP" (Price dropped below TP)?
-                 # Let's map "TP < Market" text to "Unfavorable Direction"?
-                 # Actually, for Short, "TP < Market" is the normal 'holding' state.
-                 # "Market below TP" is the 'done' state.
-                 # If user wants cancel on "TP < Market" for Short, it would cancel immediately.
-                 # I suspect user logic is inverted or I am misinterpreting "TP<Market" as the LABEL vs the LOGIC.
-                 # Let's assume the condition is "Price went past TP".
-                 # Short: Market < TP.
-                 # Long: Market > TP.
-                 
-                 # But sticking to the specific string requested "Cancel-2:TP<Market".
-                 # I will log exactly that.
-                 cond_tp = pending_tp < current_market_price
-
-            msg_tp = "Yes" if cond_tp else "None"
-            # However, for Short, cond_tp is almost always Yes.
-            # If I cancel on "Yes", it breaks.
-            # I will disable the ACTUAL cancel for now if it seems wrong, or assume "None" means "False".
-            # User said: "Cancel-2:TP<Market: None".
-            # For Short (Entry 2982, TP 2976, Market 2980).
-            # TP(2976) < Market(2980). Result is TRUE.
-            # But log says "None".
-            # So "TP < Market" condition must be FALSE?
-            # 2976 < 2980 is True.
-            # So the condition for "None" must be "TP >= Market"?
-            # Or maybe the label is "Cancel if TP < Market" and the value is "None" (False).
-            # But 2976 IS < 2980.
-            # This implies the Cancel Trigger is NOT "TP < Market".
-            # It might be "Market < TP"? (For Short).
-            # If Market (2980) < TP (2976)? False. -> None.
-            # OK, so for Short, the condition being checked is likely "Market < TP".
-            # And the label "Cancel-2:TP<Market" is just a label?
-            # Or maybe "TP < Market" is the condition for LONG?
-            # Let's use standard logic: "Target Passed".
-            # For Short: Market < TP.
-            # For Long: Market > TP.
-            
             is_target_passed = False
-            # REVERSED: Based on user feedback "Reverse" and "Not market below tp, But tp below market"
-            if signal == 1: # Long
-                 # Cancel if TP is BELOW market (We passed it)
-                 if current_market_price > pending_tp: is_target_passed = True
-            else: # Short
-                 # Cancel if TP is ABOVE market (We passed it on the way down)
-                 if current_market_price < pending_tp: is_target_passed = True
+            pending_tp = 0.0
             
-            # Logs removed to reduce volume, consolidated below at debug level
-            
-            # 3. Entry Check (Internal state calculation)
-            cond_entry = False
             if signal == 1: # Long
-                 if limit_price < current_market_price: cond_entry = True
+                pending_tp = limit_price + tp_offset
+                if current_market_price > pending_tp:
+                    is_target_passed = True
             else: # Short
-                 if limit_price > current_market_price: cond_entry = True
+                pending_tp = limit_price - tp_offset
+                if current_market_price < pending_tp:
+                    is_target_passed = True
 
-            # REFINED LOGIC: Always respect the FULL seconds timer if price hasn't hit TP/Entry rules.
-            # LOGGING AUDIT: Consolidate logs to reduce noise
-            log_state = f"C1:{'Y' if time_passed else 'N'}|C2:{'Y' if is_target_passed else 'N'}|C3:{'Y' if cond_entry else 'N'}"
-            self.log(f"Order {order_id} Monitor: {log_state}", level="debug")
+            # 3. Entry Check (Taker Avoidance / Directional Move)
+            is_entry_unfavorable = False
+            if signal == 1: # Long
+                # Cancel if Entry < Market (Price moved up, making order a taker or too high)
+                if current_market_price > limit_price:
+                    is_entry_unfavorable = True
+            else: # Short
+                # Cancel if Entry > Market (Price moved down, making order a taker or too low)
+                if current_market_price < limit_price:
+                    is_entry_unfavorable = True
 
             # Execute Cancellation based on priority
             should_cancel = False
             cancel_msg = ""
             
-            # STRICT TIMER ENFORCEMENT: Time-limit is the absolute rule
             if time_passed:
                 should_cancel = True
                 cancel_msg = f"Time Limit ({cancel_unfilled_seconds}s) reached"
             
-            # Sub-flag: Should we also cancel on price? 
-            # (Keeping price rules active but secondary to the log)
-            elif is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
-                # should_cancel = True # Re-evaluate if we want to wait NO MATTER WHAT
-                # cancel_msg = "TP Rule Triggered"
-                pass # DECISION: Following user "it still closes before countdown finishes"
-                     # I will temporarily bypass price-based cancellations for pending orders
-                     # so they stay for the FULL countdown.
-            elif cond_entry and self.config.get('cancel_on_entry_price_below_market'):
-                # should_cancel = True
-                # cancel_msg = "Entry Rule Triggered"
-                pass 
+            elif signal == -1: # Short
+                if is_target_passed and self.config.get('cancel_on_tp_price_below_market'):
+                    should_cancel = True
+                    cancel_msg = f"Short TP Price Unfavorable (Market {current_market_price:.2f} passed TP {pending_tp:.2f})"
+                elif is_entry_unfavorable and self.config.get('cancel_on_entry_price_below_market'):
+                    should_cancel = True
+                    cancel_msg = f"Short Entry Price Unfavorable (Market {current_market_price:.2f} passed Entry {limit_price:.2f})"
+
+            elif signal == 1: # Long
+                if is_target_passed and self.config.get('cancel_on_tp_price_above_market'):
+                    should_cancel = True
+                    cancel_msg = f"Long TP Price Unfavorable (Market {current_market_price:.2f} passed TP {pending_tp:.2f})"
+                elif is_entry_unfavorable and self.config.get('cancel_on_entry_price_above_market'):
+                    should_cancel = True
+                    cancel_msg = f"Long Entry Price Unfavorable (Market {current_market_price:.2f} passed Entry {limit_price:.2f})"
 
             if should_cancel:
                 self.log(f"Cancel Order {order_id} ({cancel_msg})")
@@ -1959,31 +2033,37 @@ class TradingBotEngine:
             now = time.time()
             try:
                 # 1. High Frequency: Cancellation Check (every ~1s)
+                # Note: Only cancel if trading is active or we still have tracked pending orders
                 self._check_cancel_conditions()
 
-                # 2. PnL-Based Auto-Exit Check
+                # 2. PnL-Based Auto-Exit Check (Now works even in Stop mode)
                 use_auto_cancel = self.config.get('use_pnl_auto_cancel', False)
                 threshold = self.config.get('pnl_auto_cancel_threshold', 100.0)
-                if use_auto_cancel and self.net_profit >= threshold and self.is_running:
-                    self.log(f"PNL TARGET HIT! Profit ${self.net_profit:.2f} >= ${threshold:.2f}. Triggering Auto-Exit Shutdown.", level="critical")
-                    # Stop the bot first to prevent new orders
+                if use_auto_cancel and self.net_profit >= threshold:
+                    self.log(f"PNL TARGET HIT! Profit ${self.net_profit:.2f} >= ${threshold:.2f}. Triggering Auto-Exit Liquidate.", level="critical")
+
+                    # Stop trading logic if active
                     self.is_running = False
-                    self.stop_event.set()
+
                     # Cancel all pending orders and close all positions
                     self._close_all_entry_orders()
                     self._check_and_close_any_open_position()
                     self.emit('bot_status', {'running': False})
-                    self.log("Auto-Exit Shutdown Complete.", level="info")
-                    return # Exit the thread
+                    self.log("Auto-Exit Liquidate Complete.", level="info")
+                    # We don't exit the thread, as we want to continue monitoring
                 
                 # 3. Connection Health: Stale Price Monitor
                 price_age = now - self.last_price_update_time
-                if price_age > 30 and self.is_running:
+                if price_age > 30:
                      self.log(f"WARNING: Market price is STALE ({price_age:.1f}s). Re-initializing WebSocket...", level="warning")
                      # Reset update time to avoid spamming reconnects
                      self.last_price_update_time = now 
-                     # Trigger async reconnect
-                     threading.Thread(target=self._initialize_websocket, daemon=True).start()
+                     # Trigger reconnect by closing the current WebSocket
+                     if self.ws:
+                         try:
+                             self.ws.close()
+                         except:
+                             pass
                 
                 # 3. Lower Frequency: Account Info & Emitting (every ~10s)
                 if now - last_account_sync >= 10:
@@ -2001,8 +2081,12 @@ class TradingBotEngine:
             self.log("Trading loop started.", level="debug")
 
             while not self.stop_event.is_set():
+                if not self.is_running:
+                    time.sleep(1)
+                    continue
+
                 # 1. Entry Loop
-                while not self.stop_event.is_set():
+                while self.is_running and not self.stop_event.is_set():
                     self.log("-" * 90)
                     self.log("-" * 90)
                     self.log("Check Entry Condition")
@@ -2140,10 +2224,15 @@ class TradingBotEngine:
             
             if response and response.get('code') == '0':
                 fills = response.get('data', [])
+
+                # Calculate time window (e.g. last 24 hours) to include manual orders and past session profit
+                now_ms = int(time.time() * 1000)
+                time_window_ms = 24 * 60 * 60 * 1000 # 24 Hours
+                start_time_limit = now_ms - time_window_ms
+
                 for fill in fills:
-                     # Filter for session only
                      fill_ts = int(fill.get('ts', 0))
-                     if fill_ts < self.bot_start_time:
+                     if fill_ts < start_time_limit:
                          continue
 
                      # 'pnl' field contains realized profit for closing trades
@@ -2189,20 +2278,23 @@ class TradingBotEngine:
         response_balance = self._okx_request("GET", path_balance, params=params_balance)
 
         with self.account_info_lock:
+            found_total_eq = 0.0
             found_avail_bal = 0.0
-            found_total_bal = 0.0
+            found_bal = 0.0
             if response_balance and response_balance.get('code') == '0':
                 data = response_balance.get('data', [])
                 if data and len(data) > 0:
                     account_details = data[0]
+                    found_total_eq = safe_float(account_details.get('totalEq', '0'))
                     for detail in account_details.get('details', []):
                         if detail.get('ccy') == 'USDT':
-                            found_total_bal = safe_float(detail.get('bal', '0'))
+                            found_bal = safe_float(detail.get('bal', '0'))
                             found_avail_bal = safe_float(detail.get('availBal', '0'))
                             break
             
-            self.account_balance = found_avail_bal 
+            self.account_balance = found_avail_bal # Revert to available balance for frontend display
             self.available_balance = found_avail_bal
+            self.total_equity = found_total_eq
             total_balance = self.account_balance
             available_balance = self.available_balance
         
@@ -2442,7 +2534,7 @@ class TradingBotEngine:
         # Emit data to frontend
         self.emit('account_update', {
             'total_trades': total_active_trades_count,
-            'total_capital': self.initial_total_capital,
+            'total_capital': self.total_equity, # User: Total Capital should be estimated available balance (Equity)
             'max_allowed_used_display': max_allowed_display, 
             'max_amount_display': max_amount_display,
             'used_amount': used_amount_notional, 
@@ -2465,15 +2557,31 @@ class TradingBotEngine:
 
         try:
             # Set global API settings for testing based on self.config (which was modified by app.py)
-            if self.config.get('use_testnet'):
-                okx_api_key = self.config.get('okx_demo_api_key', '')
-                okx_api_secret = self.config.get('okx_demo_api_secret', '')
-                okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+            use_dev = self.config.get('use_developer_api', False)
+            use_demo = self.config.get('use_testnet', False)
+
+            if use_dev:
+                if use_demo:
+                    okx_api_key = self.config.get('dev_demo_api_key', '')
+                    okx_api_secret = self.config.get('dev_demo_api_secret', '')
+                    okx_passphrase = self.config.get('dev_demo_api_passphrase', '')
+                else:
+                    okx_api_key = self.config.get('dev_api_key', '')
+                    okx_api_secret = self.config.get('dev_api_secret', '')
+                    okx_passphrase = self.config.get('dev_passphrase', '')
+            else:
+                if use_demo:
+                    okx_api_key = self.config.get('okx_demo_api_key', '')
+                    okx_api_secret = self.config.get('okx_demo_api_secret', '')
+                    okx_passphrase = self.config.get('okx_demo_api_passphrase', '')
+                else:
+                    okx_api_key = self.config.get('okx_api_key', '')
+                    okx_api_secret = self.config.get('okx_api_secret', '')
+                    okx_passphrase = self.config.get('okx_passphrase', '')
+
+            if use_demo:
                 okx_simulated_trading_header = {'x-simulated-trading': '1'}
             else:
-                okx_api_key = self.config.get('okx_api_key', '')
-                okx_api_secret = self.config.get('okx_api_secret', '')
-                okx_passphrase = self.config.get('okx_passphrase', '')
                 okx_simulated_trading_header = {}
 
             # Attempt a simple API call, e.g., get account balance
@@ -2634,7 +2742,6 @@ class TradingBotEngine:
 
             if modified_count > 0:
                 self.log(f"Successfully modified TP/SL for {modified_count} sides.", level="info")
-                self.emit('success', {'message': f'Successfully modified TP/SL for {modified_count} sides.'})
             else:
                 self.log("No active positions found (or matched criteria) to modify TP/SL.", level="debug")
         
@@ -2684,7 +2791,6 @@ class TradingBotEngine:
 
             if cancelled_count > 0:
                 self.log(f"✅ Cancelled {cancelled_count} pending orders.", level="info")
-                self.emit('success', {'message': f'Successfully cancelled {cancelled_count} pending orders.'})
             else:
                 self.log("No orders to cancel.", level="warning")
                 self.emit('warning', {'message': 'No pending orders found to cancel.'})
@@ -2705,10 +2811,8 @@ class TradingBotEngine:
             
             if closed_pos:
                 self.log("✓ Emergency SL: Positions closed and orders cancelled.", level="info")
-                self.emit('success', {'message': 'Emergency SL: All positions closed and orders cancelled.'})
             else:
                 self.log("✓ Emergency SL: Orders cancelled (no active positions found).", level="info")
-                self.emit('success', {'message': 'Emergency SL: All orders cancelled.'})
         except Exception as e:
             self.log(f"Error during Emergency SL: {e}", level="error")
             self.emit('error', {'message': f'Emergency SL failed: {e}'})
